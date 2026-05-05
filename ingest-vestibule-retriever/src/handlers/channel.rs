@@ -9,6 +9,17 @@ pub async fn insert_discord_channel(
     pool: &PgPool,
     channel: &GuildChannel,
 ) -> color_eyre::Result<()> {
+    if sqlx::query_scalar!(
+        "SELECT channel_id from discord_channels WHERE channel_id = $1",
+        channel.id.get() as i64
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some()
+    {
+        return Ok(());
+    }
+
     let mut channels_to_insert = vec![channel.clone()];
     let mut current_parent_id = channel.parent_id;
 
@@ -49,11 +60,7 @@ pub async fn insert_discord_channel(
         };
 
         if let Err(e) = db_channel.insert(pool).await {
-            tracing::debug!(
-                "Failed to insert channel {} (might already exist): {}",
-                ch.id.get(),
-                e
-            );
+            tracing::error!("Failed to insert channel {}: {}", ch.id.get(), e);
         }
     }
 
