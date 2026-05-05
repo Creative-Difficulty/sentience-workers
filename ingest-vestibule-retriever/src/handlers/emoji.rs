@@ -40,10 +40,9 @@ pub async fn handle_emoji_resolution(
             }
 
             // Download emoji and store as a media asset via S3 object key
-            let asset_id = Uuid::new_v4();
-            let object_key = format!("discord/emojis/{}/{}.webp", id.get(), asset_id);
+            let object_key = format!("discord/emojis/{}.webp", id.get());
 
-            super::attachments::process_and_store_media(
+            let asset_id = super::attachments::process_and_store_media(
                 pool,
                 s3_client,
                 s3_bucket,
@@ -66,6 +65,7 @@ pub async fn handle_emoji_resolution(
 
             if let Err(e) = new_emoji.insert(pool).await {
                 tracing::error!(error = %e, "Failed to insert discord emoji");
+                return Err(e.into());
             }
             Ok(Some(new_emoji_id))
         }
@@ -95,6 +95,7 @@ pub async fn handle_emoji_resolution(
             };
             if let Err(e) = new_emoji.insert(pool).await {
                 tracing::error!(error = %e, "Failed to insert discord emoji");
+                return Err(e.into());
             }
             Ok(Some(new_emoji_id))
         }

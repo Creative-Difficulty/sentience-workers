@@ -56,7 +56,7 @@ impl EventHandler for DiscordEventHandler {
                 }
             };
 
-            if let Err(e) = crate::handlers::insert_discord_channel(&db_pool, &guild_channel).await
+            if let Err(e) = crate::handlers::insert_discord_channel(&ctx, &db_pool, &guild_channel).await
             {
                 tracing::error!(error = %e, "channel insertion into db failed");
             } else {
