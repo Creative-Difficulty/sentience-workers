@@ -77,17 +77,18 @@ impl EventHandler for DiscordEventHandler {
 
             tokio::time::sleep(Duration::from_secs(5)).await;
 
-            let thread_id = serenity::all::ChannelId::new(msg.id.get());
-            let mnemos_opened_thread_id = match ctx.http.get_channel(thread_id).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to get new thread channel id for intro message after 5 seconds");
-                    return;
-                }
-            };
+            // Mnemos no longer creates new threads as it has been removed from the server :(
+            // let thread_id = serenity::all::ChannelId::new(msg.id.get());
+            // match ctx.http.get_channel(thread_id).await {
+            //     Ok(c) => {
+            //         tracing::info!(thread_id = %c.id(), "Found automatically opened intro thread");
+            //     }
+            //     Err(e) => {
+            //         tracing::warn!(error = %e, "Failed to get new thread channel id for intro message after 5 seconds");
+            //         return;
+            //     }
+            // };
 
-            // TODO explain this to the hackclub reviewers in demo video
-            tracing::info!(thread_id = %mnemos_opened_thread_id.id(), "Found automatically opened intro thread");
             tracing::debug!("finished task");
         });
     }
