@@ -3,7 +3,7 @@ use serenity::all::GuildChannel;
 use sqlx::PgPool;
 use unidb::models::{DiscordChannel, enums::DiscordChannelType};
 
-#[tracing::instrument(skip(pool, channel))]
+#[tracing::instrument(skip_all)]
 pub async fn insert_discord_channel(
     pool: &PgPool,
     channel: &GuildChannel,
@@ -21,7 +21,9 @@ pub async fn insert_discord_channel(
         channel_id: channel.id.get() as i64,
         name: channel.name.clone(),
         channel_type,
-        parent_channel_id: channel.parent_id.map(|id| id.get() as i64),
+        // TODO ix parent channel handling (insert parent always before child, maybe use recursion for this to get the top top top most parent?)
+        // parent_channel_id: channel.parent_id.map(|id| id.get() as i64),
+        parent_channel_id: None,
     }
     .insert(pool)
     .await?;

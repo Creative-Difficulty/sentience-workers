@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use unidb::models::MessageEdit;
 use uuid::Uuid;
 
-#[tracing::instrument(skip(_ctx, pool, msg))]
+#[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
 pub async fn handle_message_edit(
     _ctx: &Context,
     pool: &PgPool,

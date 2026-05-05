@@ -129,7 +129,7 @@ impl EventHandler for DiscordEventHandler {
     }
 
     #[tracing::instrument(skip_all, fields(msg_id=add_reaction.message_id.get()))]
-    async fn reaction_add(&self, _ctx: Context, add_reaction: Reaction) {
+    async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
         let span = tracing::info_span!(
             "reaction_add_handler",
             msg_id = add_reaction.message_id.get()
@@ -147,12 +147,14 @@ impl EventHandler for DiscordEventHandler {
 
         tokio::spawn(async move {
             if let Err(e) = crate::handlers::handle_reaction_add(
+                &ctx,
                 &db_pool,
                 &s3_client,
                 &s3_bucket,
                 &add_reaction,
             )
             .await
+
             {
                 tracing::error!(error = %e, "Failed to process reaction add handler");
             } else {

@@ -21,7 +21,8 @@ async fn main() -> color_eyre::Result<()> {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILDS
-        | GatewayIntents::GUILD_MEMBERS;
+        | GatewayIntents::GUILD_MEMBERS
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
     let s3_client = setup_s3(&env_vars).await?;
 
@@ -55,8 +56,7 @@ fn setup_tracing() -> color_eyre::Result<()> {
     let subscriber = tracing_subscriber::layer::SubscriberExt::with(
         tracing_subscriber::layer::SubscriberExt::with(
             tracing_subscriber::registry(),
-            tracing_subscriber::fmt::layer()
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE),
+            tracing_subscriber::fmt::layer(), // .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE),
         ),
         filter,
     );

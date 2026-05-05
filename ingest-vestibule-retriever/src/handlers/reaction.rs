@@ -30,8 +30,9 @@ pub async fn handle_reaction_remove(pool: &PgPool, reaction: &Reaction) -> color
     Ok(())
 }
 
-#[tracing::instrument(skip(pool, reaction))]
+#[tracing::instrument(skip_all)]
 pub async fn handle_reaction_add(
+    ctx: &Context,
     pool: &PgPool,
     s3_client: &aws_sdk_s3::Client,
     s3_bucket: &str,
@@ -44,6 +45,40 @@ pub async fn handle_reaction_add(
             return Ok(());
         }
     };
+
+    let message_exists = sqlx::query!(
+        "SELECT 1 as exists FROM messages WHERE message_id = $1",
+        reaction.message_id.get() as i64
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if message_exists.is_none() {
+        tracing::warn!("Message {} does not exist in database, attempting to fetch and process it", reaction.message_id.get());
+        match ctx.http.get_message(reaction.channel_id, reaction.message_id).await {
+            Ok(msg) => {
+                if let Err(e) = crate::handlers::message::process_discord_message_and_children(
+                    ctx,
+                    pool,
+                    s3_client,
+                    s3_bucket,
+                    &msg,
+                )
+                .await
+                {
+                    tracing::error!(error = %e, "Failed to process missing message for reaction");
+                    return Err(e);
+                }
+                // process_discord_message_and_children already processes all reactions on the message,
+                // so we don't need to insert this one again.
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to fetch missing message for reaction from Discord");
+                return Err(e.into());
+            }
+        }
+    }
 
     let emoji_id = handle_emoji_resolution(
         pool,

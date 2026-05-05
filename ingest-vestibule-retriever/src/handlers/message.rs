@@ -13,7 +13,7 @@ use unidb::models::Message as DbMessage;
 ///   4. Fetches and stores reactions
 ///
 /// Used by both the live `EventHandler` and `historical_scan`.
-#[tracing::instrument(skip(ctx, pool, msg))]
+#[tracing::instrument(skip_all)]
 pub async fn process_discord_message_and_children(
     ctx: &Context,
     pool: &PgPool,
