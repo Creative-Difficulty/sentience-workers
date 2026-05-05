@@ -123,6 +123,9 @@ pub async fn insert_reactions(
                 .await
             {
                 Ok(batch) => {
+                    if batch.is_empty() {
+                        break;
+                    }
                     after = Some(batch.last().unwrap().id);
                     users.extend(batch);
                 }

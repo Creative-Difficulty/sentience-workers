@@ -3,7 +3,7 @@ use serenity::all::{Context, GuildChannel};
 use sqlx::PgPool;
 use unidb::models::{DiscordChannel, enums::DiscordChannelType};
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, fields(channel_id=channel.id.get()))]
 pub async fn insert_discord_channel(
     ctx: &Context,
     pool: &PgPool,
@@ -17,6 +17,7 @@ pub async fn insert_discord_channel(
     .await?
     .is_some()
     {
+        tracing::debug!("Channel is already in db");
         return Ok(());
     }
 
