@@ -1,0 +1,14 @@
+[package]
+name = "job-watcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+color-eyre = { workspace = true }
+dotenvy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+ormlite = { workspace = true }
+unidb = { workspace = true }

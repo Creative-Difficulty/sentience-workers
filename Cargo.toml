@@ -1,5 +1,5 @@
 [workspace]
-members = ["ingest-vestibule-retriever"]
+members = ["ingest-vestibule-retriever", "job-watcher"]
 resolver = "2"
 
 [workspace.dependencies]
