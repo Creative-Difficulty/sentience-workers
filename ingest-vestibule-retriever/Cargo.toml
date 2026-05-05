@@ -13,3 +13,11 @@ sqlx = { workspace = true }
 ormlite = { workspace = true }
 serenity = { workspace = true }
 unidb = { workspace = true }
+reqwest = "0.13.3"
+base64 = "0.22.1"
+chrono = "0.4.44"
+uuid = { version = "1.23.1", features = ["v8"] }
+sha2 = "0.11"
+hex = "0.4.3"
+aws-config = "1.8.16"
+aws-sdk-s3 = "1.131.0"

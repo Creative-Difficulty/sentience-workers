@@ -1,0 +1,7 @@
+- [ ] Capture all reasonable discord events: <https://docs.rs/serenity/latest/serenity/client/enum.FullEvent.html>
+- [ ] Make reaction deletion more fine-grained
+- [ ] Make all delete methods set deleted_at instead of deleting from db (add deleted_at to all most tables in unidb)
+- [ ] Make sure everywhere where we query the db, we reference it by discord user id and nothing else (discord user id is the only stable identifier)
+- [ ] Handle when people change their username or display name or server specific display name, etc.
+- [ ] Cut down on tracing
+- [ ] TODO improve S3 object key format, current is:  `attachments/<message_id>/<attachment_id>/<filename>`

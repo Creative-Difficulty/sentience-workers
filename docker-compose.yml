@@ -1,0 +1,97 @@
+services:
+    # ─── RustFS S3-compatible object storage ───────────────────────────
+    rustfs:
+        image: rustfs/rustfs:latest
+        container_name: rustfs-s3
+        security_opt:
+            - "no-new-privileges:true"
+        ports:
+            - "9000:9000" # S3 API
+            - "9001:9001" # Web Console
+        environment:
+            RUSTFS_VOLUMES: /data/rustfs{0..3}
+            RUSTFS_ADDRESS: 0.0.0.0:9000
+            RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+            RUSTFS_CONSOLE_ENABLE: "true"
+            RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+            RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+            RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-devadmin}
+            RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-devadmin}
+            RUSTFS_OBS_LOGGER_LEVEL: debug
+            RUSTFS_OBS_LOG_DIRECTORY: /logs
+        volumes:
+            - rustfs_data:/data
+            - rustfs_logs:/logs
+        networks:
+            - sentience
+        restart: unless-stopped
+        healthcheck:
+            test: ["CMD", "sh", "-c", "curl -f http://127.0.0.1:9000/health && curl -f http://127.0.0.1:9001/rustfs/console/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 40s
+
+    # ─── PostgreSQL for local development ──────────────────────────────
+    postgres:
+        image: postgres:16-alpine
+        container_name: sentience-postgres
+        ports:
+            - "5432:5432"
+        environment:
+            POSTGRES_USER: ${POSTGRES_USER:-postgres}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+            POSTGRES_DB: ${POSTGRES_DB:-sentience}
+        volumes:
+            - pg_data:/var/lib/postgresql/data
+        networks:
+            - sentience
+        restart: unless-stopped
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+
+    # ─── Ingest Vestibule Retriever (Rust worker) ─────────────────────
+    ingest-vestibule-retriever:
+        build:
+            context: .
+            dockerfile: Dockerfile
+            target: runtime
+        container_name: ingest-vestibule-retriever
+        env_file:
+            - ./ingest-vestibule-retriever/.env
+        environment:
+            # Override DATABASE_URL to point at the local Postgres container
+            DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentience}
+            # S3 / RustFS connection details (available in the app via std::env)
+            S3_ENDPOINT: http://rustfs:9000
+            S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-devadmin}
+            S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:-devadmin}
+            S3_BUCKET: ${S3_BUCKET:-sentience}
+            S3_REGION: ${S3_REGION:-us-east-1}
+            RUST_LOG: ingest_vestibule_retriever=debug
+        networks:
+            - sentience
+        restart: unless-stopped
+        depends_on:
+            rustfs:
+                condition: service_healthy
+            postgres:
+                condition: service_healthy
+        profiles:
+            - app # opt-in: docker compose --profile app up
+
+networks:
+    sentience:
+        driver: bridge
+
+volumes:
+    rustfs_data:
+        driver: local
+    rustfs_logs:
+        driver: local
+    pg_data:
+        driver: local
