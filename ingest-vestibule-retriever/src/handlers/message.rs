@@ -41,6 +41,27 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         .as_ref()
         .and_then(|r| r.message_id.map(|id| id.get() as i64));
 
+    if let Some(in_reply_to) = in_reply_to {
+        let exists =
+            sqlx::query_scalar!("SELECT 1 FROM messages WHERE message_id = $1", in_reply_to)
+                .fetch_optional(&ctx.db_pool)
+                .await?;
+
+        if exists.is_none() {
+            let parent_msg = ctx
+                .discord_ctx
+                .http
+                .get_message(
+                    msg.channel_id,
+                    serenity::all::MessageId::new(in_reply_to.try_into()?),
+                )
+                .await?;
+
+            // I have no idea why I need to box here and what it does in an async context but it works
+            Box::pin(ensure_message(ctx, &parent_msg)).await?;
+        }
+    }
+
     DbMessage {
         message_id: msg.id.get() as i64,
         channel_id: msg.channel_id.get() as i64,
