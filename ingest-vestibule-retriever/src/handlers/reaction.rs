@@ -54,30 +54,32 @@ pub async fn handle_reaction_add(
     .await?;
 
     if message_exists.is_none() {
-        tracing::warn!("Message {} does not exist in database, attempting to fetch and process it", reaction.message_id.get());
-        match ctx.http.get_message(reaction.channel_id, reaction.message_id).await {
+        tracing::warn!(
+            "Message {} does not exist in database, attempting to fetch and process it",
+            reaction.message_id.get()
+        );
+        match ctx
+            .http
+            .get_message(reaction.channel_id, reaction.message_id)
+            .await
+        {
             Ok(msg) => {
-                if let Err(e) = crate::handlers::message::process_discord_message_and_children(
-                    ctx,
-                    pool,
-                    s3_client,
-                    s3_bucket,
-                    &msg,
-                )
-                .await
+                if let Err(e) =
+                    crate::handlers::ensure_message(ctx, pool, s3_client, s3_bucket, &msg).await
                 {
                     tracing::error!(error = %e, "Failed to process missing message for reaction");
                     return Err(e);
                 }
-                // process_discord_message_and_children already processes all reactions on the message,
-                // so we don't need to insert this one again.
-                return Ok(());
             }
             Err(e) => {
                 tracing::error!(error = %e, "Failed to fetch missing message for reaction from Discord");
                 return Err(e.into());
             }
         }
+
+        // ensure_message already processes all reactions on the message,
+        // so we don't need to insert this one again.
+        return Ok(());
     }
 
     let emoji_id = handle_emoji_resolution(
@@ -123,10 +125,10 @@ pub async fn insert_reactions(
                 .await
             {
                 Ok(batch) => {
-                    if batch.is_empty() {
-                        break;
-                    }
-                    after = Some(batch.last().unwrap().id);
+                    after = match batch.last() {
+                        Some(last) => Some(last.id),
+                        None => break,
+                    };
                     users.extend(batch);
                 }
                 Err(e) => {

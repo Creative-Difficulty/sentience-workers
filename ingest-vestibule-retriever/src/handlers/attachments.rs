@@ -225,7 +225,7 @@ pub async fn insert_stickers(
                     pool,
                     s3_client,
                     s3_bucket,
-                    object_key.clone(),
+                    object_key,
                     &sticker_url,
                     content_type,
                 )

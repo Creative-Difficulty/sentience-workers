@@ -1,17 +1,18 @@
 use ormlite::Model as _;
-use serenity::all::{Context, GuildChannel};
+use serenity::all::Context;
 use sqlx::PgPool;
 use unidb::models::{DiscordChannel, enums::DiscordChannelType};
 
-#[tracing::instrument(skip_all, fields(channel_id=channel.id.get()))]
-pub async fn insert_discord_channel(
+#[tracing::instrument(skip_all, fields(channel_id=channel_id.get()))]
+pub async fn ensure_discord_channel(
     ctx: &Context,
     pool: &PgPool,
-    channel: &GuildChannel,
+    channel_id: serenity::all::ChannelId,
 ) -> color_eyre::Result<()> {
+    // Check if it already exists
     if sqlx::query_scalar!(
         "SELECT channel_id from discord_channels WHERE channel_id = $1",
-        channel.id.get() as i64
+        channel_id.get() as i64
     )
     .fetch_optional(pool)
     .await?
@@ -20,6 +21,15 @@ pub async fn insert_discord_channel(
         tracing::debug!("Channel is already in db");
         return Ok(());
     }
+
+    // Need to fetch it and its parents
+    let channel = match ctx.http.get_channel(channel_id).await {
+        Ok(c) => match c.guild() {
+            Some(gc) => gc,
+            None => return Err(color_eyre::eyre::eyre!("Not a guild channel")),
+        },
+        Err(e) => return Err(color_eyre::eyre::eyre!("Failed to fetch channel: {}", e)),
+    };
 
     let mut channels_to_insert = vec![channel.clone()];
     let mut current_parent_id = channel.parent_id;

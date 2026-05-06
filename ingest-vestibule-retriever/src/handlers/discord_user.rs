@@ -75,6 +75,7 @@ pub async fn upsert_discord_user(
         } else {
             "png"
         };
+
         let object_key = format!("discord/avatars/{}/{}", discord_user_id, avatar_hash);
 
         // Check if we already have this avatar

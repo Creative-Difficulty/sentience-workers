@@ -1,10 +1,41 @@
 use crate::handlers::attachments::{insert_message_attachments, insert_stickers};
-use crate::handlers::author::upsert_discord_user;
+use crate::handlers::channel::ensure_discord_channel;
+use crate::handlers::discord_user::upsert_discord_user;
 use crate::handlers::reaction::insert_reactions;
 use ormlite::Model as _;
 use serenity::all::{Context, Message};
 use sqlx::PgPool;
 use unidb::models::Message as DbMessage;
+
+pub async fn ensure_message(
+    ctx: &Context,
+    pool: &PgPool,
+    s3_client: &aws_sdk_s3::Client,
+    s3_bucket: &str,
+    msg: &Message,
+) -> color_eyre::Result<()> {
+    // Check if message is already in db
+    let existing = sqlx::query!(
+        "SELECT message_id FROM messages WHERE message_id = $1",
+        msg.id.get() as i64
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    if let Err(e) = ensure_discord_channel(ctx, pool, msg.channel_id).await {
+        tracing::warn!(
+            "Failed to ensure channel exists before message is inserted: {}",
+            e
+        );
+        return Err(e);
+    }
+
+    process_discord_message_and_children(ctx, pool, s3_client, s3_bucket, msg).await
+}
 
 /// Processes a single Discord message completely:
 ///   1. Inserts author if not in db (VestibuleUser + DiscordAccount)
@@ -14,7 +45,7 @@ use unidb::models::Message as DbMessage;
 ///
 /// Used by both the live `EventHandler` and `historical_scan`.
 #[tracing::instrument(skip_all)]
-pub async fn process_discord_message_and_children(
+async fn process_discord_message_and_children(
     ctx: &Context,
     pool: &PgPool,
     s3_client: &aws_sdk_s3::Client,

@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use serenity::{
     all::{ChannelId, Context, EventHandler, GuildId, Message, Reaction},
     async_trait,
@@ -18,11 +16,6 @@ pub struct DiscordEventHandler {
 impl EventHandler for DiscordEventHandler {
     #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
     async fn message(&self, ctx: Context, msg: Message) {
-        let span = tracing::info_span!("new_msg_handler", msg_id = msg.id.get());
-        let _enter = span.enter();
-
-        tracing::debug!("starting message handler");
-
         if msg.guild_id != Some(self.guild_id) {
             return;
         }
@@ -38,36 +31,8 @@ impl EventHandler for DiscordEventHandler {
 
             tracing::debug!("started message processing task");
 
-            let guild_channel = match ctx.http.get_channel(msg.channel_id).await {
-                Ok(c) => match c.guild() {
-                    Some(gc) => gc,
-                    None => {
-                        tracing::error!("not a guild channel");
-                        return;
-                    }
-                },
-                Err(e) => {
-                    tracing::error!(
-                        channel_id = msg.channel_id.get(),
-                        "Failed to get channel with ctx.http: {:?}",
-                        e
-                    );
-                    return;
-                }
-            };
-
             if let Err(e) =
-                crate::handlers::insert_discord_channel(&ctx, &db_pool, &guild_channel).await
-            {
-                tracing::error!(error = %e, "channel insertion into db failed");
-            } else {
-                tracing::debug!("Upserted channel metadata");
-            }
-
-            if let Err(e) = crate::handlers::process_discord_message_and_children(
-                &ctx, &db_pool, &s3_client, &s3_bucket, &msg,
-            )
-            .await
+                crate::handlers::ensure_message(&ctx, &db_pool, &s3_client, &s3_bucket, &msg).await
             {
                 tracing::error!(error = %e, "Handler failed for message");
             }
@@ -76,9 +41,8 @@ impl EventHandler for DiscordEventHandler {
                 tracing::info!("Received message in intro channel");
             }
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
             // Mnemos no longer creates new threads as it has been removed from the server :(
+            // tokio::time::sleep(Duration::from_secs(5)).await;
             // let thread_id = serenity::all::ChannelId::new(msg.id.get());
             // match ctx.http.get_channel(thread_id).await {
             //     Ok(c) => {
@@ -102,14 +66,8 @@ impl EventHandler for DiscordEventHandler {
         new_msg: Option<Message>,
         _event: serenity::all::MessageUpdateEvent,
     ) {
-        let msg = match new_msg {
-            Some(m) => m,
-            None => {
-                tracing::warn!(
-                    "Message edit event was dispatched, however new message content is None"
-                );
-                return;
-            }
+        let Some(msg) = new_msg else {
+            return;
         };
 
         if msg.guild_id != Some(self.guild_id) {
@@ -119,9 +77,19 @@ impl EventHandler for DiscordEventHandler {
         // bc the handler outlives the function, we need to clone
         let db_pool = self.db_pool.clone();
         let ctx_clone = ctx.clone();
+        let s3_bucket_clone = self.s3_bucket.clone();
+        let s3_client_clone = self.s3_client.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = crate::handlers::handle_message_edit(&ctx_clone, &db_pool, &msg).await {
+            if let Err(e) = crate::handlers::handle_message_edit(
+                &ctx_clone,
+                &s3_client_clone,
+                s3_bucket_clone,
+                &db_pool,
+                &msg,
+            )
+            .await
+            {
                 tracing::error!(error = %e, "Failed to process message edit handler");
             } else {
                 tracing::debug!("Successfully logged message edit");

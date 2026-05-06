@@ -18,6 +18,8 @@ async fn main() -> color_eyre::Result<()> {
     tokio::fs::write("/tmp/ready", "1").await?;
     tracing::debug!("wrote readiness file to /tmp/ready");
 
+    job_watcher::watcher::start_watching(&db_pool).await?;
+
     Ok(())
 }
 

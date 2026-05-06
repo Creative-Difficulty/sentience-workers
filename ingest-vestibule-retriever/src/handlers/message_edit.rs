@@ -1,3 +1,4 @@
+use aws_sdk_s3::Client;
 use ormlite::Model as _;
 use serenity::all::{Context, Message};
 use sqlx::PgPool;
@@ -6,10 +7,17 @@ use uuid::Uuid;
 
 #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
 pub async fn handle_message_edit(
-    _ctx: &Context,
+    ctx: &Context,
+    s3_client: &Client,
+    s3_bucket: String,
     pool: &PgPool,
     msg: &Message,
 ) -> color_eyre::Result<()> {
+    if let Err(e) = crate::handlers::ensure_message(ctx, pool, s3_client, &s3_bucket, msg).await {
+        tracing::error!(error = %e, "Failed to process insert message into db for reaction");
+        return Err(e);
+    }
+
     if let Some(edited_at) = msg.edited_timestamp {
         let old_content = sqlx::query_scalar!(
             "SELECT content FROM messages WHERE message_id = $1",
