@@ -1,7 +1,7 @@
 use crate::AppCtx;
 use crate::handlers::attachments::{insert_message_attachments, insert_stickers};
 use crate::handlers::channel::ensure_discord_channel;
-use crate::handlers::discord_user::upsert_discord_user;
+use crate::handlers::discord_user::ensure_user;
 use crate::handlers::reaction::insert_reactions;
 use ormlite::Model as _;
 use serenity::all::Message;
@@ -28,14 +28,14 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
     }
 
     if let Err(e) = ensure_discord_channel(ctx, msg.channel_id).await {
-        tracing::warn!(
+        tracing::error!(
             "Failed to ensure channel exists before message is inserted: {}",
             e
         );
         return Err(e);
     }
 
-    upsert_discord_user(ctx, msg).await?;
+    ensure_user(ctx, &msg.author).await?;
 
     // TODO When its all done, how do we make sure every messages' `in_reply_to` message is acutally in the db: Insert messgaes by first sent = first inserted
     let in_reply_to = msg

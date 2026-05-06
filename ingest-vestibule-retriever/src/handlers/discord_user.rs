@@ -1,23 +1,13 @@
 use crate::AppCtx;
 use ormlite::Model;
-use serenity::all::Message;
 use sha2::{Digest, Sha256};
 use unidb::models::{DiscordAccount, MediaAsset, VestibuleUser};
 use uuid::Uuid;
 
-pub async fn upsert_discord_user(
-    ctx: &AppCtx,
-    msg: &Message,
-) -> color_eyre::Result<()> {
-    if msg.author.bot {
-        return Ok(());
-    }
-
-    let discord_user_id = msg.author.id.get() as i64;
-
+pub async fn ensure_user(ctx: &AppCtx, user: &serenity::all::User) -> color_eyre::Result<()> {
     let existing_account = sqlx::query!(
         "SELECT discord_user_id, vestibule_user_id FROM discord_accounts WHERE discord_user_id = $1",
-        discord_user_id
+        user.id.get() as i64
     )
     .fetch_optional(&ctx.db_pool)
     .await?;
@@ -29,10 +19,9 @@ pub async fn upsert_discord_user(
         let vestibule_user = VestibuleUser {
             id: vestibule_user_id,
             nickname: Some(
-                msg.author
-                    .global_name
+                user.global_name
                     .clone()
-                    .unwrap_or_else(|| msg.author.name.clone()),
+                    .unwrap_or_else(|| user.name.clone()),
             ),
             intro_message_id: None,
             score_id: None,
@@ -46,14 +35,10 @@ pub async fn upsert_discord_user(
         vestibule_user.insert(&ctx.db_pool).await?;
 
         let discord_account = DiscordAccount {
-            discord_user_id,
+            discord_user_id: user.id.get() as i64,
             vestibule_user_id,
-            username: msg.author.name.clone(),
-            display_name: msg
-                .author
-                .global_name
-                .clone()
-                .unwrap_or(msg.author.name.clone()),
+            username: user.name.clone(),
+            display_name: user.global_name.clone().unwrap_or(user.name.clone()),
         };
 
         if let Err(e) = discord_account.insert(&ctx.db_pool).await {
@@ -61,20 +46,20 @@ pub async fn upsert_discord_user(
         }
     }
 
-    if let Some(avatar_url) = msg.author.avatar_url() {
-        let avatar_hash = msg
-            .author
+    if let Some(avatar_url) = user.avatar_url() {
+        let avatar_hash = user
             .avatar
             .as_ref()
             .map(|h| h.to_string())
             .unwrap_or_else(|| "default".to_string());
+
         let ext = if avatar_url.contains(".gif") {
             "gif"
         } else {
-            "png"
+            "webp"
         };
 
-        let object_key = format!("discord/avatars/{}/{}", discord_user_id, avatar_hash);
+        let object_key = format!("discord/avatars/{}/{}", user.id.get(), avatar_hash);
 
         // Check if we already have this avatar
         let existing_avatar = sqlx::query_scalar!(
@@ -95,7 +80,8 @@ pub async fn upsert_discord_user(
 
                     let stream = aws_sdk_s3::primitives::ByteStream::from(bytes.to_vec());
 
-                    if let Err(e) = ctx.s3_client
+                    if let Err(e) = ctx
+                        .s3_client
                         .put_object()
                         .bucket(&ctx.s3_bucket)
                         .key(&object_key)

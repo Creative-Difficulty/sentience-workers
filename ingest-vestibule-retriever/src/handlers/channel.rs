@@ -40,7 +40,10 @@ pub async fn ensure_discord_channel(
                 channels_to_insert.push(parent_channel);
             }
             Ok(_) => {
-                tracing::warn!("Parent channel {} is not a guild channel", parent_id.get());
+                tracing::error!(
+                    "Parent channel {} is not a guild channel, not recording it as a parent channel",
+                    parent_id.get()
+                );
                 break;
             }
             Err(e) => {

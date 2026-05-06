@@ -43,7 +43,8 @@ pub async fn process_and_store_media(
     let size_bytes = bytes.len() as i64;
     let stream = aws_sdk_s3::primitives::ByteStream::from(bytes);
 
-    if let Err(e) = ctx.s3_client
+    if let Err(e) = ctx
+        .s3_client
         .put_object()
         .bucket(&ctx.s3_bucket)
         .key(&object_key)
@@ -69,7 +70,7 @@ pub async fn process_and_store_media(
     .insert(&ctx.db_pool)
     .await
     {
-        tracing::error!("Failed to insert media asset: {}", e);
+        tracing::error!(error=%e, "Failed to insert media asset");
         return Err(e.into());
     }
 
@@ -77,10 +78,7 @@ pub async fn process_and_store_media(
 }
 
 #[tracing::instrument(skip_all, fields(message_id=msg.id.get(), attachment_id = tracing::field::Empty))]
-pub async fn insert_message_attachments(
-    ctx: &AppCtx,
-    msg: &Message,
-) -> color_eyre::Result<()> {
+pub async fn insert_message_attachments(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
     for attachment in &msg.attachments {
         tracing::Span::current().record("attachment_id", attachment.id.get());
 
@@ -97,7 +95,7 @@ pub async fn insert_message_attachments(
             }
             Ok(None) => (),
             Err(e) => {
-                tracing::error!("{}", e);
+                tracing::error!(error=%e);
                 continue;
             }
         };
@@ -116,23 +114,17 @@ pub async fn insert_message_attachments(
             discord_attachment_id,
         );
 
-        let asset_id = match process_and_store_media(
-            ctx,
-            object_key,
-            &attachment.url,
-            content_type,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "Error while downloading media and uploading it to S3: {}",
-                    e
-                );
-                continue;
-            }
-        };
+        let asset_id =
+            match process_and_store_media(ctx, object_key, &attachment.url, content_type).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        "Error while downloading media and uploading it to S3: {}",
+                        e
+                    );
+                    continue;
+                }
+            };
 
         if let Err(e) = (MessageAttachment {
             id: Uuid::new_v4(),
@@ -144,7 +136,7 @@ pub async fn insert_message_attachments(
         .insert(&ctx.db_pool)
         .await
         {
-            tracing::error!("{}", e);
+            tracing::error!(error=%e);
             continue;
         };
 
@@ -157,12 +149,12 @@ pub async fn insert_message_attachments(
     Ok(())
 }
 
-pub async fn insert_stickers(
-    ctx: &AppCtx,
-    msg: &Message,
-) -> color_eyre::Result<()> {
+#[tracing::instrument(skip_all, fields(message_id=msg.id.get(), sticker_id = tracing::field::Empty))]
+pub async fn insert_stickers(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
     for sticker in &msg.sticker_items {
         let sticker_id = sticker.id.get() as i64;
+        tracing::Span::current().record("sticker_id", sticker_id);
+
         let existing = sqlx::query_scalar!(
             "SELECT ma.id FROM message_attachments ma WHERE ma.message_id = $1 AND ma.asset_id IN (SELECT id FROM media_assets WHERE object_key LIKE $2)",
             msg.id.get() as i64,
@@ -183,8 +175,9 @@ pub async fn insert_stickers(
         };
 
         if ext == "bin" {
-            tracing::warn!(
-                "Failed to determine file type of sticker, so falling back to .bin extension"
+            tracing::error!(
+                sticker_format_type = ?sticker.format_type,
+                "Failed to determine file type of sticker, falling back to .bin extension"
             );
             continue;
         }
@@ -213,17 +206,10 @@ pub async fn insert_stickers(
             };
 
             asset_id = Some(
-                match process_and_store_media(
-                    ctx,
-                    object_key,
-                    &sticker_url,
-                    content_type,
-                )
-                .await
-                {
+                match process_and_store_media(ctx, object_key, &sticker_url, content_type).await {
                     Ok(u) => u,
                     Err(e) => {
-                        tracing::error!("{}", e);
+                        tracing::error!(error=%e);
                         continue;
                     }
                 },
@@ -242,7 +228,7 @@ pub async fn insert_stickers(
             .insert(&ctx.db_pool)
             .await
             {
-                tracing::error!("Failed to insert sticker attachment row: {}", e);
+                tracing::error!(error=%e, "Failed to insert sticker attachment row");
                 continue;
             };
         }
