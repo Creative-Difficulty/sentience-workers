@@ -7,6 +7,13 @@ use ormlite::Model as _;
 use serenity::all::Message;
 use unidb::models::Message as DbMessage;
 
+/// Processes a single Discord message completely:
+///   1. Inserts author if not in db (VestibuleUser + DiscordAccount)
+///   2. Inserts message row
+///   3. Downloads and stores attachments as MediaAssets & MessageAttachments and uploads them to S3 bucket
+///   4. Fetches and stores reactions
+///
+/// Used by both the live `EventHandler` and `historical_scan`.
 pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
     // Check if message is already in db
     let existing = sqlx::query!(
@@ -28,21 +35,6 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         return Err(e);
     }
 
-    process_discord_message_and_children(ctx, msg).await
-}
-
-/// Processes a single Discord message completely:
-///   1. Inserts author if not in db (VestibuleUser + DiscordAccount)
-///   2. Inserts message row
-///   3. Downloads and stores attachments as MediaAssets & MessageAttachments and uploads them to S3 bucket
-///   4. Fetches and stores reactions
-///
-/// Used by both the live `EventHandler` and `historical_scan`.
-#[tracing::instrument(skip_all)]
-async fn process_discord_message_and_children(
-    ctx: &AppCtx,
-    msg: &Message,
-) -> color_eyre::Result<()> {
     upsert_discord_user(ctx, msg).await?;
 
     // TODO When its all done, how do we make sure every messages' `in_reply_to` message is acutally in the db: Insert messgaes by first sent = first inserted
