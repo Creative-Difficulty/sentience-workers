@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
 pub async fn handle_message_edit(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
     if let Err(e) = crate::handlers::ensure_message(ctx, msg).await {
-        tracing::error!(error = %e, "Failed to process insert message into db for reaction");
+        tracing::error!(error = %e, "Failed to ensure message into db for message edit");
         return Err(e);
     }
 

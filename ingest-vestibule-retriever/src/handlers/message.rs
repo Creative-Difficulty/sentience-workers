@@ -2,7 +2,6 @@ use crate::AppCtx;
 use crate::handlers::attachments::{insert_message_attachments, insert_stickers};
 use crate::handlers::channel::ensure_discord_channel;
 use crate::handlers::discord_user::ensure_user;
-use crate::handlers::reaction::insert_reactions;
 use ormlite::Model as _;
 use serenity::all::Message;
 use unidb::models::Message as DbMessage;
@@ -65,10 +64,6 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         if let Err(e) = insert_stickers(ctx, msg).await {
             tracing::error!(error = %e, "Failed to process stickers");
         }
-    }
-
-    if let Err(e) = insert_reactions(ctx, msg).await {
-        tracing::error!(error = %e, "Failed to process reactions");
     }
 
     Ok(())

@@ -1,5 +1,6 @@
 pub mod discord_handler;
 pub mod handlers;
+pub mod historical;
 
 use serenity::all::Context;
 use sqlx::PgPool;
