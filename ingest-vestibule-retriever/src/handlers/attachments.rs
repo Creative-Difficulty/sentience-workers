@@ -1,7 +1,7 @@
+use crate::AppCtx;
 use ormlite::Model as _;
 use serenity::all::Message;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use unidb::models::{MediaAsset, MessageAttachment};
 use uuid::Uuid;
 
@@ -9,9 +9,7 @@ use uuid::Uuid;
 /// Returns ID of media asset it inserted.
 /// Because S3 upload happens first, worse case is that we have stray files in the S3 bucket
 pub async fn process_and_store_media(
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     object_key: String,
     url: &str,
     content_type: String,
@@ -36,7 +34,7 @@ pub async fn process_and_store_media(
         "SELECT id FROM media_assets WHERE content_hash = $1",
         content_hash
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.db_pool)
     .await?
     {
         return Ok(already_uploaded_uuid);
@@ -45,9 +43,9 @@ pub async fn process_and_store_media(
     let size_bytes = bytes.len() as i64;
     let stream = aws_sdk_s3::primitives::ByteStream::from(bytes);
 
-    if let Err(e) = s3_client
+    if let Err(e) = ctx.s3_client
         .put_object()
-        .bucket(s3_bucket)
+        .bucket(&ctx.s3_bucket)
         .key(&object_key)
         .body(stream)
         .content_type(&content_type)
@@ -68,7 +66,7 @@ pub async fn process_and_store_media(
         content_hash: Some(content_hash),
         embedding: None,
     })
-    .insert(pool)
+    .insert(&ctx.db_pool)
     .await
     {
         tracing::error!("Failed to insert media asset: {}", e);
@@ -80,9 +78,7 @@ pub async fn process_and_store_media(
 
 #[tracing::instrument(skip_all, fields(message_id=msg.id.get(), attachment_id = tracing::field::Empty))]
 pub async fn insert_message_attachments(
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     msg: &Message,
 ) -> color_eyre::Result<()> {
     for attachment in &msg.attachments {
@@ -94,7 +90,7 @@ pub async fn insert_message_attachments(
             msg.id.get() as i64,
             format!("discord/attachments/{}/{}", msg.id.get(), discord_attachment_id)
         )
-        .fetch_optional(pool).await {
+        .fetch_optional(&ctx.db_pool).await {
             Ok(Some(_)) => {
                 tracing::debug!("Attachment is already stored in db attachments table, skipping");
                 continue;
@@ -121,9 +117,7 @@ pub async fn insert_message_attachments(
         );
 
         let asset_id = match process_and_store_media(
-            pool,
-            s3_client,
-            s3_bucket,
+            ctx,
             object_key,
             &attachment.url,
             content_type,
@@ -147,7 +141,7 @@ pub async fn insert_message_attachments(
             added_at: chrono::Utc::now(),
             deleted_at: None,
         })
-        .insert(pool)
+        .insert(&ctx.db_pool)
         .await
         {
             tracing::error!("{}", e);
@@ -164,10 +158,8 @@ pub async fn insert_message_attachments(
 }
 
 pub async fn insert_stickers(
+    ctx: &AppCtx,
     msg: &Message,
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
 ) -> color_eyre::Result<()> {
     for sticker in &msg.sticker_items {
         let sticker_id = sticker.id.get() as i64;
@@ -176,7 +168,7 @@ pub async fn insert_stickers(
             msg.id.get() as i64,
             format!("discord/stickers/{}.%", sticker_id)
         )
-        .fetch_optional(pool)
+        .fetch_optional(&ctx.db_pool)
         .await?;
 
         if existing.is_some() {
@@ -209,7 +201,7 @@ pub async fn insert_stickers(
             "SELECT id FROM media_assets WHERE object_key = $1",
             object_key
         )
-        .fetch_optional(pool)
+        .fetch_optional(&ctx.db_pool)
         .await?;
 
         if asset_id.is_none() {
@@ -222,9 +214,7 @@ pub async fn insert_stickers(
 
             asset_id = Some(
                 match process_and_store_media(
-                    pool,
-                    s3_client,
-                    s3_bucket,
+                    ctx,
                     object_key,
                     &sticker_url,
                     content_type,
@@ -249,7 +239,7 @@ pub async fn insert_stickers(
                 added_at: chrono::Utc::now(),
                 deleted_at: None,
             })
-            .insert(pool)
+            .insert(&ctx.db_pool)
             .await
             {
                 tracing::error!("Failed to insert sticker attachment row: {}", e);

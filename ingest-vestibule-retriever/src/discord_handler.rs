@@ -1,3 +1,4 @@
+use crate::AppCtx;
 use serenity::{
     all::{ChannelId, Context, EventHandler, GuildId, Message, Reaction},
     async_trait,
@@ -12,6 +13,17 @@ pub struct DiscordEventHandler {
     pub guild_id: GuildId,
 }
 
+impl DiscordEventHandler {
+    fn ctx(&self, discord_ctx: Context) -> AppCtx {
+        AppCtx {
+            db_pool: self.db_pool.clone(),
+            s3_client: self.s3_client.clone(),
+            s3_bucket: self.s3_bucket.clone(),
+            discord_ctx,
+        }
+    }
+}
+
 #[async_trait]
 impl EventHandler for DiscordEventHandler {
     #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
@@ -20,9 +32,7 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        let db_pool = self.db_pool.clone();
-        let s3_client = self.s3_client.clone();
-        let s3_bucket = self.s3_bucket.clone();
+        let app_ctx = self.ctx(ctx);
         let intro_channel_id = self.intro_channel_id;
 
         tokio::spawn(async move {
@@ -31,28 +41,13 @@ impl EventHandler for DiscordEventHandler {
 
             tracing::debug!("started message processing task");
 
-            if let Err(e) =
-                crate::handlers::ensure_message(&ctx, &db_pool, &s3_client, &s3_bucket, &msg).await
-            {
+            if let Err(e) = crate::handlers::ensure_message(&app_ctx, &msg).await {
                 tracing::error!(error = %e, "Handler failed for message");
             }
 
             if msg.channel_id == intro_channel_id {
                 tracing::info!("Received message in intro channel");
             }
-
-            // Mnemos no longer creates new threads as it has been removed from the server :(
-            // tokio::time::sleep(Duration::from_secs(5)).await;
-            // let thread_id = serenity::all::ChannelId::new(msg.id.get());
-            // match ctx.http.get_channel(thread_id).await {
-            //     Ok(c) => {
-            //         tracing::info!(thread_id = %c.id(), "Found automatically opened intro thread");
-            //     }
-            //     Err(e) => {
-            //         tracing::warn!(error = %e, "Failed to get new thread channel id for intro message after 5 seconds");
-            //         return;
-            //     }
-            // };
 
             tracing::debug!("finished task");
         });
@@ -74,22 +69,10 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        // bc the handler outlives the function, we need to clone
-        let db_pool = self.db_pool.clone();
-        let ctx_clone = ctx.clone();
-        let s3_bucket_clone = self.s3_bucket.clone();
-        let s3_client_clone = self.s3_client.clone();
+        let app_ctx = self.ctx(ctx);
 
         tokio::spawn(async move {
-            if let Err(e) = crate::handlers::handle_message_edit(
-                &ctx_clone,
-                &s3_client_clone,
-                s3_bucket_clone,
-                &db_pool,
-                &msg,
-            )
-            .await
-            {
+            if let Err(e) = crate::handlers::handle_message_edit(&app_ctx, &msg).await {
                 tracing::error!(error = %e, "Failed to process message edit handler");
             } else {
                 tracing::debug!("Successfully logged message edit");
@@ -110,20 +93,10 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        let db_pool = self.db_pool.clone();
-        let s3_client = self.s3_client.clone();
-        let s3_bucket = self.s3_bucket.clone();
+        let app_ctx = self.ctx(ctx);
 
         tokio::spawn(async move {
-            if let Err(e) = crate::handlers::handle_reaction_add(
-                &ctx,
-                &db_pool,
-                &s3_client,
-                &s3_bucket,
-                &add_reaction,
-            )
-            .await
-            {
+            if let Err(e) = crate::handlers::handle_reaction_add(&app_ctx, &add_reaction).await {
                 tracing::error!(error = %e, "Failed to process reaction add handler");
             } else {
                 tracing::debug!("Successfully logged reaction addition");
@@ -132,7 +105,7 @@ impl EventHandler for DiscordEventHandler {
     }
 
     #[tracing::instrument(skip_all, fields(msg_id=remove_reaction.message_id.get()))]
-    async fn reaction_remove(&self, _ctx: Context, remove_reaction: Reaction) {
+    async fn reaction_remove(&self, ctx: Context, remove_reaction: Reaction) {
         let span = tracing::info_span!(
             "reaction_remove_handler",
             msg_id = remove_reaction.message_id.get()
@@ -144,11 +117,11 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        let db_pool = self.db_pool.clone();
+        let app_ctx = self.ctx(ctx);
 
         tokio::spawn(async move {
             if let Err(e) =
-                crate::handlers::handle_reaction_remove(&db_pool, &remove_reaction).await
+                crate::handlers::handle_reaction_remove(&app_ctx, &remove_reaction).await
             {
                 tracing::error!(error = %e, "Failed to delete reaction from database");
             } else {

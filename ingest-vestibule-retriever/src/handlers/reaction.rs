@@ -1,6 +1,6 @@
+use crate::AppCtx;
 use ormlite::Model as _;
-use serenity::all::{Context, Message, Reaction};
-use sqlx::PgPool;
+use serenity::all::{Message, Reaction};
 use unidb::models::MessageReaction;
 use uuid::Uuid;
 
@@ -8,7 +8,7 @@ use crate::handlers::emoji::handle_emoji_resolution;
 
 // TODO This deletes every reaction of that user on that message, we need to narrow this down
 // TODO set deleted_at instead of removing from db
-pub async fn handle_reaction_remove(pool: &PgPool, reaction: &Reaction) -> color_eyre::Result<()> {
+pub async fn handle_reaction_remove(ctx: &AppCtx, reaction: &Reaction) -> color_eyre::Result<()> {
     let user_id = match reaction.user_id {
         Some(id) => id.get() as i64,
         None => {
@@ -24,7 +24,7 @@ pub async fn handle_reaction_remove(pool: &PgPool, reaction: &Reaction) -> color
         msg_id,
         user_id
     )
-    .execute(pool)
+    .execute(&ctx.db_pool)
     .await?;
 
     Ok(())
@@ -32,10 +32,7 @@ pub async fn handle_reaction_remove(pool: &PgPool, reaction: &Reaction) -> color
 
 #[tracing::instrument(skip_all)]
 pub async fn handle_reaction_add(
-    ctx: &Context,
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     reaction: &Reaction,
 ) -> color_eyre::Result<()> {
     let user_id = match reaction.user_id {
@@ -46,11 +43,11 @@ pub async fn handle_reaction_add(
         }
     };
 
-    let message_exists = sqlx::query!(
-        "SELECT 1 as exists FROM messages WHERE message_id = $1",
+    let message_exists = sqlx::query_scalar!(
+        "SELECT 1 FROM messages WHERE message_id = $1",
         reaction.message_id.get() as i64
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.db_pool)
     .await?;
 
     if message_exists.is_none() {
@@ -58,14 +55,14 @@ pub async fn handle_reaction_add(
             "Message {} does not exist in database, attempting to fetch and process it",
             reaction.message_id.get()
         );
-        match ctx
+        match ctx.discord_ctx
             .http
             .get_message(reaction.channel_id, reaction.message_id)
             .await
         {
             Ok(msg) => {
                 if let Err(e) =
-                    crate::handlers::ensure_message(ctx, pool, s3_client, s3_bucket, &msg).await
+                    crate::handlers::ensure_message(ctx, &msg).await
                 {
                     tracing::error!(error = %e, "Failed to process missing message for reaction");
                     return Err(e);
@@ -83,9 +80,7 @@ pub async fn handle_reaction_add(
     }
 
     let emoji_id = handle_emoji_resolution(
-        pool,
-        s3_client,
-        s3_bucket,
+        ctx,
         &reaction.emoji,
         reaction.guild_id,
     )
@@ -99,7 +94,7 @@ pub async fn handle_reaction_add(
         reacted_at: chrono::Utc::now(),
     };
 
-    if let Err(e) = db_reaction.insert(pool).await {
+    if let Err(e) = db_reaction.insert(&ctx.db_pool).await {
         tracing::error!(error = %e, "Failed to insert reaction into database");
         return Err(e.into());
     }
@@ -108,10 +103,7 @@ pub async fn handle_reaction_add(
 }
 
 pub async fn insert_reactions(
-    ctx: &Context,
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     msg: &Message,
 ) -> color_eyre::Result<()> {
     for reaction in &msg.reactions {
@@ -121,7 +113,7 @@ pub async fn insert_reactions(
         // Get all message reactions if there are over 100, Discord API limits at 100 per request
         loop {
             match msg
-                .reaction_users(&ctx.http, reaction.reaction_type.clone(), Some(100), after)
+                .reaction_users(&ctx.discord_ctx.http, reaction.reaction_type.clone(), Some(100), after)
                 .await
             {
                 Ok(batch) => {
@@ -139,9 +131,7 @@ pub async fn insert_reactions(
         }
 
         let emoji_id = handle_emoji_resolution(
-            pool,
-            s3_client,
-            s3_bucket,
+            ctx,
             &reaction.reaction_type,
             msg.guild_id,
         )
@@ -155,7 +145,7 @@ pub async fn insert_reactions(
                 emoji_id,
                 reacted_at: chrono::Utc::now(),
             };
-            if let Err(e) = db_reaction.insert(pool).await {
+            if let Err(e) = db_reaction.insert(&ctx.db_pool).await {
                 tracing::warn!(error = %e, "Failed to insert reaction");
             }
         }

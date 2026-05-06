@@ -1,32 +1,26 @@
+use crate::AppCtx;
 use crate::handlers::attachments::{insert_message_attachments, insert_stickers};
 use crate::handlers::channel::ensure_discord_channel;
 use crate::handlers::discord_user::upsert_discord_user;
 use crate::handlers::reaction::insert_reactions;
 use ormlite::Model as _;
-use serenity::all::{Context, Message};
-use sqlx::PgPool;
+use serenity::all::Message;
 use unidb::models::Message as DbMessage;
 
-pub async fn ensure_message(
-    ctx: &Context,
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
-    msg: &Message,
-) -> color_eyre::Result<()> {
+pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
     // Check if message is already in db
     let existing = sqlx::query!(
         "SELECT message_id FROM messages WHERE message_id = $1",
         msg.id.get() as i64
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.db_pool)
     .await?;
 
     if existing.is_some() {
         return Ok(());
     }
 
-    if let Err(e) = ensure_discord_channel(ctx, pool, msg.channel_id).await {
+    if let Err(e) = ensure_discord_channel(ctx, msg.channel_id).await {
         tracing::warn!(
             "Failed to ensure channel exists before message is inserted: {}",
             e
@@ -34,7 +28,7 @@ pub async fn ensure_message(
         return Err(e);
     }
 
-    process_discord_message_and_children(ctx, pool, s3_client, s3_bucket, msg).await
+    process_discord_message_and_children(ctx, msg).await
 }
 
 /// Processes a single Discord message completely:
@@ -46,25 +40,10 @@ pub async fn ensure_message(
 /// Used by both the live `EventHandler` and `historical_scan`.
 #[tracing::instrument(skip_all)]
 async fn process_discord_message_and_children(
-    ctx: &Context,
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     msg: &Message,
 ) -> color_eyre::Result<()> {
-    upsert_discord_user(pool, s3_client, s3_bucket, msg).await?;
-
-    let existing = sqlx::query!(
-        "SELECT message_id FROM messages WHERE message_id = $1",
-        msg.id.get() as i64
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    if existing.is_some() {
-        tracing::debug!("Message already exists in database, returning");
-        return Ok(());
-    }
+    upsert_discord_user(ctx, msg).await?;
 
     // TODO When its all done, how do we make sure every messages' `in_reply_to` message is acutally in the db: Insert messgaes by first sent = first inserted
     let in_reply_to = msg
@@ -83,21 +62,20 @@ async fn process_discord_message_and_children(
         in_reply_to,
         added_at: chrono::Utc::now(),
     }
-    .insert(pool)
+    .insert(&ctx.db_pool)
     .await?;
 
-    #[allow(clippy::collapsible_if)]
     if !msg.attachments.is_empty() {
-        if let Err(e) = insert_message_attachments(pool, s3_client, s3_bucket, msg).await {
+        if let Err(e) = insert_message_attachments(ctx, msg).await {
             tracing::error!(error = %e, "Failed to process attachments");
         }
 
-        if let Err(e) = insert_stickers(msg, pool, s3_client, s3_bucket).await {
+        if let Err(e) = insert_stickers(ctx, msg).await {
             tracing::error!(error = %e, "Failed to process stickers");
         }
     }
 
-    if let Err(e) = insert_reactions(ctx, pool, s3_client, s3_bucket, msg).await {
+    if let Err(e) = insert_reactions(ctx, msg).await {
         tracing::error!(error = %e, "Failed to process reactions");
     }
 

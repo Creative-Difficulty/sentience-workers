@@ -1,19 +1,15 @@
-use aws_sdk_s3::Client;
+use crate::AppCtx;
 use ormlite::Model as _;
-use serenity::all::{Context, Message};
-use sqlx::PgPool;
+use serenity::all::Message;
 use unidb::models::MessageEdit;
 use uuid::Uuid;
 
 #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
 pub async fn handle_message_edit(
-    ctx: &Context,
-    s3_client: &Client,
-    s3_bucket: String,
-    pool: &PgPool,
+    ctx: &AppCtx,
     msg: &Message,
 ) -> color_eyre::Result<()> {
-    if let Err(e) = crate::handlers::ensure_message(ctx, pool, s3_client, &s3_bucket, msg).await {
+    if let Err(e) = crate::handlers::ensure_message(ctx, msg).await {
         tracing::error!(error = %e, "Failed to process insert message into db for reaction");
         return Err(e);
     }
@@ -23,7 +19,7 @@ pub async fn handle_message_edit(
             "SELECT content FROM messages WHERE message_id = $1",
             msg.id.get() as i64
         )
-        .fetch_optional(pool)
+        .fetch_optional(&ctx.db_pool)
         .await?
         .ok_or_else(|| {
             color_eyre::eyre::eyre!(
@@ -39,7 +35,7 @@ pub async fn handle_message_edit(
             edited_at: *edited_at,
         };
 
-        edit.insert(pool).await?;
+        edit.insert(&ctx.db_pool).await?;
 
         // Also update the messages table row to the current state
         sqlx::query!(
@@ -48,7 +44,7 @@ pub async fn handle_message_edit(
             *edited_at,
             msg.id.get() as i64
         )
-        .execute(pool)
+        .execute(&ctx.db_pool)
         .await?;
     }
 

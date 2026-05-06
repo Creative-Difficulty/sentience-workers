@@ -1,9 +1,20 @@
 pub mod discord_handler;
 pub mod handlers;
 
+use serenity::all::Context;
+use sqlx::PgPool;
+
+#[derive(Clone)]
+pub struct AppCtx {
+    pub db_pool: PgPool,
+    pub s3_client: aws_sdk_s3::Client,
+    pub s3_bucket: String,
+    pub discord_ctx: Context,
+}
+
 // TODO Keep this around until impl of message deletion marking handler
 #[tracing::instrument(skip_all, fields(message_id = msg_id))]
-pub async fn delete_message(pool: &sqlx::PgPool, msg_id: i64) -> color_eyre::Result<()> {
+pub async fn delete_message(pool: &PgPool, msg_id: i64) -> color_eyre::Result<()> {
     tracing::trace!("Marking message as deleted in database");
     sqlx::query!(
         "UPDATE messages SET deleted_at = NOW() WHERE message_id = $1",

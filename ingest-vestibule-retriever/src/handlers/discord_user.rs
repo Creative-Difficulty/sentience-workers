@@ -1,14 +1,12 @@
+use crate::AppCtx;
 use ormlite::Model;
 use serenity::all::Message;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use unidb::models::{DiscordAccount, MediaAsset, VestibuleUser};
 use uuid::Uuid;
 
 pub async fn upsert_discord_user(
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     msg: &Message,
 ) -> color_eyre::Result<()> {
     if msg.author.bot {
@@ -21,7 +19,7 @@ pub async fn upsert_discord_user(
         "SELECT discord_user_id, vestibule_user_id FROM discord_accounts WHERE discord_user_id = $1",
         discord_user_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.db_pool)
     .await?;
 
     if existing_account.is_none() {
@@ -45,7 +43,7 @@ pub async fn upsert_discord_user(
         };
 
         // TODO fix error handling
-        vestibule_user.insert(pool).await?;
+        vestibule_user.insert(&ctx.db_pool).await?;
 
         let discord_account = DiscordAccount {
             discord_user_id,
@@ -58,7 +56,7 @@ pub async fn upsert_discord_user(
                 .unwrap_or(msg.author.name.clone()),
         };
 
-        if let Err(e) = discord_account.insert(pool).await {
+        if let Err(e) = discord_account.insert(&ctx.db_pool).await {
             tracing::error!(error = %e, "Could not upsert discord account");
         }
     }
@@ -83,7 +81,7 @@ pub async fn upsert_discord_user(
             "SELECT id FROM media_assets WHERE object_key = $1",
             object_key
         )
-        .fetch_optional(pool)
+        .fetch_optional(&ctx.db_pool)
         .await?;
 
         #[allow(clippy::collapsible_if)]
@@ -97,9 +95,9 @@ pub async fn upsert_discord_user(
 
                     let stream = aws_sdk_s3::primitives::ByteStream::from(bytes.to_vec());
 
-                    if let Err(e) = s3_client
+                    if let Err(e) = ctx.s3_client
                         .put_object()
-                        .bucket(s3_bucket)
+                        .bucket(&ctx.s3_bucket)
                         .key(&object_key)
                         .body(stream)
                         .content_type(&content_type)
@@ -117,7 +115,7 @@ pub async fn upsert_discord_user(
                         content_hash: Some(content_hash),
                         embedding: None,
                     })
-                    .insert(pool)
+                    .insert(&ctx.db_pool)
                     .await
                     {
                         tracing::error!(error = %e, "Failed to insert avatar media asset");

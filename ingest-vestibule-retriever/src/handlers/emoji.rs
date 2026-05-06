@@ -1,13 +1,11 @@
+use crate::AppCtx;
 use ormlite::Model as _;
 use serenity::all::{GuildId, ReactionType as SerenityReactionType, ReactionType};
-use sqlx::PgPool;
 use unidb::models::DiscordEmoji;
 use uuid::Uuid;
 
 pub async fn handle_emoji_resolution(
-    pool: &PgPool,
-    s3_client: &aws_sdk_s3::Client,
-    s3_bucket: &str,
+    ctx: &AppCtx,
     reaction_type: &SerenityReactionType,
     guild_id: Option<GuildId>,
 ) -> color_eyre::Result<Option<Uuid>> {
@@ -22,7 +20,7 @@ pub async fn handle_emoji_resolution(
                 "SELECT * FROM discord_emojis WHERE discord_emoji_id = $1",
                 discord_emoji_id
             )
-            .fetch_optional(pool)
+            .fetch_optional(&ctx.db_pool)
             .await?;
 
             if let Some(e) = existing_emoji {
@@ -43,9 +41,7 @@ pub async fn handle_emoji_resolution(
             let object_key = format!("discord/emojis/{}.webp", id.get());
 
             let asset_id = super::attachments::process_and_store_media(
-                pool,
-                s3_client,
-                s3_bucket,
+                ctx,
                 object_key,
                 &emoji_url,
                 "image/webp".to_string(),
@@ -63,7 +59,7 @@ pub async fn handle_emoji_resolution(
                 asset_id: Some(asset_id),
             };
 
-            if let Err(e) = new_emoji.insert(pool).await {
+            if let Err(e) = new_emoji.insert(&ctx.db_pool).await {
                 tracing::error!(error = %e, "Failed to insert discord emoji");
                 return Err(e.into());
             }
@@ -76,7 +72,7 @@ pub async fn handle_emoji_resolution(
                 "SELECT * FROM discord_emojis WHERE discord_emoji_id = $1",
                 discord_emoji_id
             )
-            .fetch_optional(pool)
+            .fetch_optional(&ctx.db_pool)
             .await?;
 
             if let Some(e) = existing_emoji {
@@ -93,7 +89,7 @@ pub async fn handle_emoji_resolution(
                 emoji_url: None,
                 asset_id: None,
             };
-            if let Err(e) = new_emoji.insert(pool).await {
+            if let Err(e) = new_emoji.insert(&ctx.db_pool).await {
                 tracing::error!(error = %e, "Failed to insert discord emoji");
                 return Err(e.into());
             }

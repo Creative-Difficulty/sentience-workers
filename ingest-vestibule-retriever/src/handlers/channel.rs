@@ -1,12 +1,10 @@
+use crate::AppCtx;
 use ormlite::Model as _;
-use serenity::all::Context;
-use sqlx::PgPool;
 use unidb::models::{DiscordChannel, enums::DiscordChannelType};
 
 #[tracing::instrument(skip_all, fields(channel_id=channel_id.get()))]
 pub async fn ensure_discord_channel(
-    ctx: &Context,
-    pool: &PgPool,
+    ctx: &AppCtx,
     channel_id: serenity::all::ChannelId,
 ) -> color_eyre::Result<()> {
     // Check if it already exists
@@ -14,7 +12,7 @@ pub async fn ensure_discord_channel(
         "SELECT channel_id from discord_channels WHERE channel_id = $1",
         channel_id.get() as i64
     )
-    .fetch_optional(pool)
+    .fetch_optional(&ctx.db_pool)
     .await?
     .is_some()
     {
@@ -23,7 +21,7 @@ pub async fn ensure_discord_channel(
     }
 
     // Need to fetch it and its parents
-    let channel = match ctx.http.get_channel(channel_id).await {
+    let channel = match ctx.discord_ctx.http.get_channel(channel_id).await {
         Ok(c) => match c.guild() {
             Some(gc) => gc,
             None => return Err(color_eyre::eyre::eyre!("Not a guild channel")),
@@ -36,7 +34,7 @@ pub async fn ensure_discord_channel(
 
     // Recursively collect all parent channels up to the root
     while let Some(parent_id) = current_parent_id {
-        match ctx.http.get_channel(parent_id).await {
+        match ctx.discord_ctx.http.get_channel(parent_id).await {
             Ok(serenity::all::Channel::Guild(parent_channel)) => {
                 current_parent_id = parent_channel.parent_id;
                 channels_to_insert.push(parent_channel);
@@ -70,7 +68,7 @@ pub async fn ensure_discord_channel(
             parent_channel_id: ch.parent_id.map(|id| id.get() as i64),
         };
 
-        if let Err(e) = db_channel.insert(pool).await {
+        if let Err(e) = db_channel.insert(&ctx.db_pool).await {
             tracing::error!("Failed to insert channel {}: {}", ch.id.get(), e);
         }
     }
