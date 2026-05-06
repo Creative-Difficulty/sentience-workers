@@ -16,7 +16,6 @@ pub async fn ensure_discord_channel(
     .await?
     .is_some()
     {
-        tracing::debug!("Channel is already in db");
         return Ok(());
     }
 

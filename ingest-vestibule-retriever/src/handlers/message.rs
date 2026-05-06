@@ -14,15 +14,14 @@ use unidb::models::Message as DbMessage;
 ///
 /// Used by both the live `EventHandler` and `historical_scan`.
 pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
-    // Check if message is already in db
-    let existing = sqlx::query!(
+    if sqlx::query!(
         "SELECT message_id FROM messages WHERE message_id = $1",
         msg.id.get() as i64
     )
     .fetch_optional(&ctx.db_pool)
-    .await?;
-
-    if existing.is_some() {
+    .await?
+    .is_some()
+    {
         return Ok(());
     }
 

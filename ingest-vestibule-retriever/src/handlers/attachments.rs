@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// Uploads from URL to S3 bucket and check if the data already exists in the media_assets table via hash. In that case it returns the media asset id of the identical asset instead of uploading twice.
 /// Returns ID of media asset it inserted.
 /// Because S3 upload happens first, worse case is that we have stray files in the S3 bucket
-pub async fn process_and_store_media(
+pub async fn download_and_store_media_asset(
     ctx: &AppCtx,
     object_key: String,
     url: &str,
@@ -115,7 +115,9 @@ pub async fn insert_message_attachments(ctx: &AppCtx, msg: &Message) -> color_ey
         );
 
         let asset_id =
-            match process_and_store_media(ctx, object_key, &attachment.url, content_type).await {
+            match download_and_store_media_asset(ctx, object_key, &attachment.url, content_type)
+                .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(
@@ -206,7 +208,9 @@ pub async fn insert_stickers(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<
             };
 
             asset_id = Some(
-                match process_and_store_media(ctx, object_key, &sticker_url, content_type).await {
+                match download_and_store_media_asset(ctx, object_key, &sticker_url, content_type)
+                    .await
+                {
                     Ok(u) => u,
                     Err(e) => {
                         tracing::error!(error=%e);

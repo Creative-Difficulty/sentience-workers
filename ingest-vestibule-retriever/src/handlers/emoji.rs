@@ -40,7 +40,7 @@ pub async fn handle_emoji_resolution(
             // Download emoji and store as a media asset via S3 object key
             let object_key = format!("discord/emojis/{}.webp", id.get());
 
-            let asset_id = super::attachments::process_and_store_media(
+            let asset_id = super::attachments::download_and_store_media_asset(
                 ctx,
                 object_key,
                 &emoji_url,

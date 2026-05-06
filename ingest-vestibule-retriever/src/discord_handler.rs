@@ -26,6 +26,20 @@ impl DiscordEventHandler {
 
 #[async_trait]
 impl EventHandler for DiscordEventHandler {
+    #[tracing::instrument(skip_all)]
+    async fn ready(&self, ctx: Context, ready: serenity::all::Ready) {
+        tracing::info!("Connected as {}", ready.user.name);
+
+        let app_ctx = self.ctx(ctx);
+        let guild_id = self.guild_id;
+
+        tokio::spawn(async move {
+            if let Err(e) = crate::historical::run_historical_scan(app_ctx, guild_id).await {
+                tracing::error!(error = %e, "Historical scan task failed");
+            }
+        });
+    }
+
     #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.guild_id != Some(self.guild_id) {
