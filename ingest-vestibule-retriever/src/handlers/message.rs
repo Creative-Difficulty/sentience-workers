@@ -82,13 +82,7 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         return Ok(());
     }
 
-    if let Err(e) = ensure_discord_channel(ctx, msg.channel_id).await {
-        tracing::error!(
-            "Failed to ensure channel exists before message is inserted: {}",
-            e
-        );
-        return Err(e);
-    }
+    ensure_discord_channel(ctx, msg.channel_id).await?;
 
     ensure_user(ctx, &msg.author).await?;
 
@@ -99,19 +93,19 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         .and_then(|r| r.message_id.map(|id| id.get() as i64));
 
     #[allow(clippy::collapsible_if)]
-    if let Some(in_reply_to) = in_reply_to {
+    if let Some(parent_id) = in_reply_to {
         if !ctx
             .message_id_cache
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .contains(&in_reply_to)
+            .contains(&parent_id)
         {
             match ctx
                 .discord_ctx
                 .http
                 .get_message(
                     msg.channel_id,
-                    serenity::all::MessageId::new(in_reply_to.try_into()?),
+                    serenity::all::MessageId::new(parent_id.try_into()?),
                 )
                 .await
             {
@@ -128,15 +122,15 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
                     };
 
                     if is_not_found {
-                        tracing::warn!(
-                            msg_id = in_reply_to,
+                        tracing::debug!(
+                            msg_id = parent_id,
                             "Parent message not found on Discord, inserting placeholder"
                         );
                         sqlx::query!(
                             "INSERT INTO messages (message_id, channel_id, sent_by, content, sent_at, last_edited, deleted_at, in_reply_to, added_at)
                              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                              ON CONFLICT (message_id) DO NOTHING",
-                            in_reply_to,
+                            parent_id,
                             msg.channel_id.get() as i64,
                             0000000000, // Fallback to 0000000000, this is a  dummy account inserted into unidb for this purpose
                             "[deleted message]",
@@ -151,7 +145,7 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
                         ctx.message_id_cache
                             .write()
                             .unwrap_or_else(|e| e.into_inner())
-                            .insert(in_reply_to);
+                            .insert(parent_id);
                     } else {
                         return Err(serenity::Error::Http(http_err).into());
                     }

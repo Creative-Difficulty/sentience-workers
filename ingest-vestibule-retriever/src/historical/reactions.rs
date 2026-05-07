@@ -4,13 +4,6 @@ use uuid::Uuid;
 
 use crate::handlers::emoji::handle_emoji_resolution;
 
-// Usage:
-// if let Err(e) =
-//                 crate::handlers::reaction::insert_all_reactions_for_message(&app_ctx, &msg).await
-//             {
-//                 tracing::error!(error = %e, "Failed to process reactions");
-//             }
-
 pub async fn insert_all_reactions_for_message(
     ctx: &AppCtx,
     msg: &Message,

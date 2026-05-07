@@ -28,14 +28,11 @@ pub async fn handle_emoji_resolution(
             }
 
             // All emojis are served in webp, this makes life way easier
-            let mut emoji_url = format!("https://cdn.discordapp.com/emojis/{}.webp", id.get());
-
-            if *animated {
-                emoji_url = format!(
-                    "https://cdn.discordapp.com/emojis/{}.webp?animated=true",
-                    id.get()
-                );
-            }
+            let emoji_url = if *animated {
+                format!("https://cdn.discordapp.com/emojis/{}.webp?animated=true", id.get())
+            } else {
+                format!("https://cdn.discordapp.com/emojis/{}.webp", id.get())
+            };
 
             // Download emoji and store as a media asset via S3 object key
             let object_key = format!("discord/emojis/{}.webp", id.get());

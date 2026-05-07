@@ -1,23 +1,14 @@
 use crate::AppCtx;
 use ormlite::Model as _;
-use serenity::all::Reaction;
+use serenity::all::{Reaction, ReactionType};
 use unidb::models::MessageReaction;
 use uuid::Uuid;
 
 use crate::handlers::emoji::handle_emoji_resolution;
 
-// TODO This deletes every reaction of that user on that message, we need to narrow this down
 // TODO set deleted_at instead of removing from db
+#[tracing::instrument(skip_all, fields(msg_id = reaction.message_id.get()))]
 pub async fn handle_reaction_remove(ctx: &AppCtx, reaction: &Reaction) -> color_eyre::Result<()> {
-    super::ensure_message(
-        ctx,
-        &ctx.discord_ctx
-            .http
-            .get_message(reaction.channel_id, reaction.message_id)
-            .await?,
-    )
-    .await?;
-
     let user_id = match reaction.user_id {
         Some(id) => id.get() as i64,
         None => {
@@ -28,13 +19,46 @@ pub async fn handle_reaction_remove(ctx: &AppCtx, reaction: &Reaction) -> color_
 
     let msg_id = reaction.message_id.get() as i64;
 
-    sqlx::query!(
-        "DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2",
-        msg_id,
-        user_id
+    let msg = ctx
+        .discord_ctx
+        .http
+        .get_message(reaction.channel_id, reaction.message_id)
+        .await?;
+
+    super::ensure_message(ctx, &msg).await?;
+
+    let emoji_discord_id = match &reaction.emoji {
+        ReactionType::Custom { id, .. } => id.get().to_string(),
+        ReactionType::Unicode(s) => s.clone(),
+        _ => {
+            tracing::warn!("Unknown reaction type in reaction_remove, skipping");
+            return Ok(());
+        }
+    };
+
+    let emoji_id: Option<Uuid> = sqlx::query_scalar!(
+        "SELECT id FROM discord_emojis WHERE discord_emoji_id = $1",
+        emoji_discord_id
     )
-    .execute(&ctx.db_pool)
+    .fetch_optional(&ctx.db_pool)
     .await?;
+
+    if let Some(id) = emoji_id {
+        sqlx::query!(
+            "DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji_id = $3",
+            msg_id,
+            user_id,
+            id
+        )
+        .execute(&ctx.db_pool)
+        .await?;
+    } else {
+        tracing::debug!(
+            msg_id,
+            user_id,
+            "Reaction to message is not in database, nothing to delete"
+        );
+    }
 
     Ok(())
 }

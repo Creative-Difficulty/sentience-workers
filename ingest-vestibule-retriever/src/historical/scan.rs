@@ -42,7 +42,7 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
                     }
                     Err(e) => {
                         // This is mostly due to missing access permissions
-                        tracing::warn!(error = %e, "Failed to get messages for channel");
+                        tracing::debug!(error = %e, "Failed to get messages for channel");
                         break;
                     }
                 }
