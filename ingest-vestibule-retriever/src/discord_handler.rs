@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{AppCtx, MessageIdCache};
+use crate::{AppCtx, IdCache};
 use serenity::{
     all::{ChannelId, Context, EventHandler, GuildId, Message, Reaction},
     async_trait,
@@ -13,7 +13,9 @@ pub struct DiscordEventHandler {
     pub s3_bucket: String,
     pub intro_channel_id: ChannelId,
     pub guild_id: GuildId,
-    pub message_id_cache: MessageIdCache,
+    pub message_id_cache: IdCache,
+    pub channel_id_cache: IdCache,
+    pub user_id_cache: IdCache,
 }
 
 impl DiscordEventHandler {
@@ -24,6 +26,8 @@ impl DiscordEventHandler {
             s3_bucket: self.s3_bucket.clone(),
             discord_ctx,
             message_id_cache: Arc::clone(&self.message_id_cache),
+            channel_id_cache: Arc::clone(&self.channel_id_cache),
+            user_id_cache: Arc::clone(&self.user_id_cache),
         }
     }
 }

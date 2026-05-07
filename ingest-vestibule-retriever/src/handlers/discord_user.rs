@@ -5,46 +5,50 @@ use unidb::models::{DiscordAccount, MediaAsset, VestibuleUser};
 use uuid::Uuid;
 
 pub async fn ensure_user(ctx: &AppCtx, user: &serenity::all::User) -> color_eyre::Result<()> {
-    let existing_account = sqlx::query!(
-        "SELECT discord_user_id, vestibule_user_id FROM discord_accounts WHERE discord_user_id = $1",
-        user.id.get() as i64
-    )
-    .fetch_optional(&ctx.db_pool)
-    .await?;
-
-    if existing_account.is_none() {
-        // TODO fix mixed UUID types: Postgres generates v7 (i think) but I like v4 the best
-        let vestibule_user_id = Uuid::new_v4();
-
-        let vestibule_user = VestibuleUser {
-            id: vestibule_user_id,
-            nickname: Some(
-                user.global_name
-                    .clone()
-                    .unwrap_or_else(|| user.name.clone()),
-            ),
-            intro_message_id: None,
-            score_id: None,
-            score_last_updated: None,
-            current_diagram: None,
-            current_diagram_last_updated: None,
-            intro_diagram: None,
-        };
-
-        // TODO fix error handling
-        vestibule_user.insert(&ctx.db_pool).await?;
-
-        let discord_account = DiscordAccount {
-            discord_user_id: user.id.get() as i64,
-            vestibule_user_id,
-            username: user.name.clone(),
-            display_name: user.global_name.clone().unwrap_or(user.name.clone()),
-        };
-
-        if let Err(e) = discord_account.insert(&ctx.db_pool).await {
-            tracing::error!(error = %e, "Could not upsert discord account");
-        }
+    if ctx
+        .user_id_cache
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&(user.id.get() as i64))
+    {
+        return Ok(());
     }
+
+    // TODO fix mixed UUID types: Postgres generates v7 (i think) but I like v4 the best
+    let vestibule_user_id = Uuid::new_v4();
+
+    let vestibule_user = VestibuleUser {
+        id: vestibule_user_id,
+        nickname: Some(
+            user.global_name
+                .clone()
+                .unwrap_or_else(|| user.name.clone()),
+        ),
+        intro_message_id: None,
+        score_id: None,
+        score_last_updated: None,
+        current_diagram: None,
+        current_diagram_last_updated: None,
+        intro_diagram: None,
+    };
+
+    vestibule_user.insert(&ctx.db_pool).await?;
+
+    let discord_account = DiscordAccount {
+        discord_user_id: user.id.get() as i64,
+        vestibule_user_id,
+        username: user.name.clone(),
+        display_name: user.global_name.clone().unwrap_or(user.name.clone()),
+    };
+
+    if let Err(e) = discord_account.insert(&ctx.db_pool).await {
+        tracing::error!(error = %e, "Could not upsert discord account");
+    }
+
+    ctx.user_id_cache
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(user.id.get() as i64);
 
     if let Some(avatar_url) = user.avatar_url() {
         let avatar_hash = user

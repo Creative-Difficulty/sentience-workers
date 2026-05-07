@@ -25,9 +25,31 @@ async fn main() -> color_eyre::Result<()> {
         .fetch_all(&db_pool)
         .await?;
     let id_count = existing_ids.len();
-    let message_id_cache: ingest_vestibule_retriever::MessageIdCache =
-        Arc::new(RwLock::new(existing_ids.into_iter().collect::<HashSet<i64>>()));
+    let message_id_cache: ingest_vestibule_retriever::IdCache = Arc::new(RwLock::new(
+        existing_ids.into_iter().collect::<HashSet<i64>>(),
+    ));
     tracing::debug!(count = id_count, "loaded message ID cache from database");
+
+    let existing_channel_ids = sqlx::query_scalar!("SELECT channel_id FROM discord_channels")
+        .fetch_all(&db_pool)
+        .await?;
+    let channel_count = existing_channel_ids.len();
+    let channel_id_cache: ingest_vestibule_retriever::IdCache = Arc::new(RwLock::new(
+        existing_channel_ids.into_iter().collect::<HashSet<i64>>(),
+    ));
+    tracing::debug!(
+        count = channel_count,
+        "loaded channel ID cache from database"
+    );
+
+    let existing_user_ids = sqlx::query_scalar!("SELECT discord_user_id FROM discord_accounts")
+        .fetch_all(&db_pool)
+        .await?;
+    let user_count = existing_user_ids.len();
+    let user_id_cache: ingest_vestibule_retriever::IdCache = Arc::new(RwLock::new(
+        existing_user_ids.into_iter().collect::<HashSet<i64>>(),
+    ));
+    tracing::debug!(count = user_count, "loaded user ID cache from database");
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
@@ -44,6 +66,8 @@ async fn main() -> color_eyre::Result<()> {
         intro_channel_id: serenity::all::ChannelId::new(env_vars.discord_intro_channel_id),
         guild_id: serenity::all::GuildId::new(env_vars.discord_guild_id),
         message_id_cache,
+        channel_id_cache,
+        user_id_cache,
     };
 
     let mut client = serenity::Client::builder(&env_vars.discord_token, intents)
