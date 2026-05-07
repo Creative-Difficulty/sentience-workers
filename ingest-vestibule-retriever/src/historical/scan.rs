@@ -57,8 +57,9 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
                 );
             }
 
-            for msg in all_messages.iter().rev() {
-                tracing::trace!("Processing message {}", msg.id.get());
+            let total = all_messages.len();
+            for (i, msg) in all_messages.iter().rev().enumerate() {
+                tracing::info!("Processing message {}/{} in channel \"{}\"", i + 1, total, channel.name);
                 if let Err(e) = crate::handlers::ensure_message(&ctx, msg).await {
                     tracing::error!(error = %e, msg_id = msg.id.get(), "Failed to ensure message is in database");
                 }
