@@ -2,6 +2,7 @@ use crate::AppCtx;
 use crate::handlers::attachments::{insert_message_attachments, insert_stickers};
 use crate::handlers::channel::ensure_discord_channel;
 use crate::handlers::discord_user::ensure_user;
+use chrono::{TimeZone, Utc};
 use ormlite::Model as _;
 use serenity::all::Message;
 use unidb::models::Message as DbMessage;
@@ -48,17 +49,51 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
                 .await?;
 
         if exists.is_none() {
-            let parent_msg = ctx
+            match ctx
                 .discord_ctx
                 .http
                 .get_message(
                     msg.channel_id,
                     serenity::all::MessageId::new(in_reply_to.try_into()?),
                 )
-                .await?;
+                .await
+            {
+                Ok(parent_msg) => {
+                    // I have no idea why I need to box here and what it does in an async context but it works
+                    Box::pin(ensure_message(ctx, &parent_msg)).await?;
+                }
+                Err(serenity::Error::Http(http_err)) => {
+                    let is_not_found = match &http_err {
+                        serenity::all::HttpError::UnsuccessfulRequest(res) => {
+                            res.status_code == serenity::all::StatusCode::NOT_FOUND
+                        }
+                        _ => false,
+                    };
 
-            // I have no idea why I need to box here and what it does in an async context but it works
-            Box::pin(ensure_message(ctx, &parent_msg)).await?;
+                    if is_not_found {
+                        tracing::warn!(
+                            msg_id = in_reply_to,
+                            "Parent message not found on Discord, inserting placeholder"
+                        );
+                        DbMessage {
+                            message_id: in_reply_to,
+                            channel_id: msg.channel_id.get() as i64,
+                            sent_by: 00000000000, // Fallback to current author since we don't know the original
+                            content: "[deleted message]".to_string(),
+                            sent_at: Utc.timestamp_opt(0, 0).unwrap(), // Fallback to current timestamp
+                            last_edited: None,
+                            deleted_at: Some(Utc.timestamp_opt(0, 0).unwrap()),
+                            in_reply_to: None,
+                            added_at: chrono::Utc::now(),
+                        }
+                        .insert(&ctx.db_pool)
+                        .await?;
+                    } else {
+                        return Err(serenity::Error::Http(http_err).into());
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     }
 
