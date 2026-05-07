@@ -1,7 +1,5 @@
 use crate::AppCtx;
-use ormlite::Model as _;
 use serenity::all::Message;
-use unidb::models::MessageReaction;
 use uuid::Uuid;
 
 use crate::handlers::emoji::handle_emoji_resolution;
@@ -59,14 +57,27 @@ pub async fn insert_all_reactions_for_message(
                 }
             }
 
-            let db_reaction = MessageReaction {
-                id: Uuid::new_v4(),
-                message_id: msg.id.get() as i64,
-                user_id: user.id.get() as i64,
+            let msg_id = msg.id.get() as i64;
+            let user_id = user.id.get() as i64;
+            let now = chrono::Utc::now();
+            let new_id = Uuid::new_v4();
+
+            // ON CONFLICT DO NOTHING avoids duplicate key errors if the reaction was
+            // already inserted by the live event handler or a previous scan run.
+            let result = sqlx::query!(
+                "INSERT INTO message_reactions (id, message_id, user_id, emoji_id, reacted_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (message_id, user_id, emoji_id) DO NOTHING",
+                new_id,
+                msg_id,
+                user_id,
                 emoji_id,
-                reacted_at: chrono::Utc::now(),
-            };
-            if let Err(e) = db_reaction.insert(&ctx.db_pool).await {
+                now
+            )
+            .execute(&ctx.db_pool)
+            .await;
+
+            if let Err(e) = result {
                 tracing::error!(error = %e, "Failed to insert reaction");
             }
         }
