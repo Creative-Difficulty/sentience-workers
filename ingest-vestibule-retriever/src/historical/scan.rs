@@ -1,7 +1,6 @@
 use crate::AppCtx;
 use serenity::all::GuildId;
 use serenity::builder::GetMessages;
-use std::time::Duration;
 
 #[tracing::instrument(skip_all)]
 pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::Result<()> {
@@ -39,7 +38,7 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
                         all_messages.extend(messages);
 
                         // A slight delay to avoid hammering the Discord API too hard
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        // tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(e) => {
                         // This is mostly due to missing access permissions

@@ -2,6 +2,7 @@ use std::env;
 
 use aws_sdk_s3::config::Credentials;
 use serenity::all::GatewayIntents;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -49,17 +50,13 @@ async fn main() -> color_eyre::Result<()> {
 }
 
 fn setup_tracing() -> color_eyre::Result<()> {
-    let filter = tracing_subscriber::filter::Targets::new()
-        .with_target(env!("CARGO_CRATE_NAME"), tracing::Level::DEBUG)
-        .with_target("serenity", tracing::level_filters::LevelFilter::OFF);
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(format!("{}=trace,serenity=off", env!("CARGO_CRATE_NAME")).parse()?)
+        .from_env_lossy();
 
-    let subscriber = tracing_subscriber::layer::SubscriberExt::with(
-        tracing_subscriber::layer::SubscriberExt::with(
-            tracing_subscriber::registry(),
-            tracing_subscriber::fmt::layer(), // .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE),
-        ),
-        filter,
-    );
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(env_filter);
 
     tracing::subscriber::set_global_default(subscriber)?;
     Ok(())
