@@ -1,5 +1,5 @@
 [package]
-name = "job-watcher"
+name = "topic-sorter"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,5 +10,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
-ormlite = { workspace = true }
 unidb = { workspace = true }
+ormlite = { workspace = true }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }

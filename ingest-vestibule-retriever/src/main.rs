@@ -11,7 +11,9 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     setup_tracing()?;
 
-    dotenvy::dotenv()?;
+    // TODO check behavior
+    dotenvy::dotenv().ok();
+
     let env_vars = get_env_vars()?;
     tracing::debug!("loaded environment variables from .env");
 
