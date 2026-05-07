@@ -1,5 +1,5 @@
 [package]
-name = "topic-sorter"
+name = "fact-extractor"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,12 +10,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
+ormlite = { workspace = true }
 unidb = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = "0.4"
-uuid = { version = "1", features = ["v4"] }
-async-openai = { version = "0.37", features = [
-    "chat-completion",
-    "native-tls",
-] }
+reqwest = "0.13.3"
+base64 = "0.22.1"
+chrono = "0.4.44"
+uuid = { version = "1.23.1", features = ["v8"] }
+sha2 = "0.11"
+hex = "0.4.3"

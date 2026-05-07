@@ -1,37 +1,40 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-use color_eyre::eyre::OptionExt;
+use async_openai::{
+    Client,
+    config::OpenAIConfig,
+    types::chat::{
+        ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
+        CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema,
+    },
+};
+use color_eyre::eyre::{OptionExt, eyre};
+use serde::Deserialize;
 use sqlx::PgPool;
+use unidb::Message;
 use uuid::Uuid;
 
-use crate::llm;
+const SYSTEM: &str = "You group chat messages by topic.
+Topic labels should be 1–5 words, lowercase, and describe what the messages are about rather than restating them.
+Reuse existing topic names when new messages continue a known topic.
+Skip messages that don't clearly belong to any multi-message topic (acknowledgments, system messages, one-off remarks).
+Only emit a group when at least two messages share that topic across the whole window, never emit a singleton group.";
 
 const BATCH_SIZE: i64 = 50;
-const CONTEXT_SIZE: i64 = 100;
+const CONTEXT_SIZE: i64 = 50;
 const IDLE_SLEEP: Duration = Duration::from_secs(5);
-
-struct Row {
-    message_id: i64,
-    channel_id: i64,
-    content: String,
-    sent_at: DateTime<Utc>,
-}
 
 #[tracing::instrument(skip_all)]
 pub async fn run(
     pool: &PgPool,
-    http: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
+    client: &Client<OpenAIConfig>,
     model: &str,
 ) -> color_eyre::Result<()> {
     loop {
         let batch = sqlx::query_as!(
-            Row,
-            r#"SELECT m.message_id, m.channel_id, m.content, m.sent_at
-               FROM messages m
+            Message,
+            r#"SELECT m.* FROM messages m
                WHERE NOT EXISTS (
                    SELECT 1 FROM message_classification_attempts mca
                    WHERE mca.message_id = m.message_id
@@ -52,7 +55,7 @@ pub async fn run(
 
         tracing::info!(count = batch.len(), "processing batch");
 
-        let mut msgs_by_channel: HashMap<i64, Vec<Row>> = HashMap::new();
+        let mut msgs_by_channel: HashMap<i64, Vec<Message>> = HashMap::new();
         for message in batch {
             msgs_by_channel
                 .entry(message.channel_id)
@@ -62,7 +65,7 @@ pub async fn run(
 
         let mut attempted: Vec<i64> = Vec::new();
         for (channel_id, msgs) in &msgs_by_channel {
-            match classify_channel(pool, http, base_url, api_key, model, *channel_id, msgs).await {
+            match classify_channel(pool, client, model, *channel_id, msgs).await {
                 Ok(()) => attempted.extend(msgs.iter().map(|m| m.message_id)),
                 Err(e) => tracing::error!(channel_id, error = %e, "channel batch failed"),
             }
@@ -86,112 +89,196 @@ pub async fn run(
 #[tracing::instrument(skip_all, fields(channel_id, batch_len = msgs.len()))]
 async fn classify_channel(
     pool: &PgPool,
-    http: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
+    client: &Client<OpenAIConfig>,
     model: &str,
     channel_id: i64,
-    msgs: &[Row],
+    msgs: &[Message],
 ) -> color_eyre::Result<()> {
-    let oldest = msgs
-        .iter()
-        .map(|m| m.sent_at)
-        .min()
-        .ok_or_eyre("Empty batch of messages passed")?;
-
-    let mut context: Vec<(i64, String, Option<String>)> = sqlx::query!(
-        r#"SELECT m.message_id, m.content, t.name AS "topic?"
+    // fetches CONTEXT_SIZE messages before the current batch with their topics (if already labeled with a topic)
+    let mut message_id_content_topic_context_msgs: Vec<(i64, String, Option<String>)> =
+        sqlx::query!(
+            r#"SELECT m.message_id, m.content, t.name AS "topic?"
            FROM messages m
            LEFT JOIN topic_message_relation tmr ON tmr.message_id = m.message_id
            LEFT JOIN topic t ON t.id = tmr.topic_id
            WHERE m.channel_id = $1 AND m.sent_at < $2 AND m.deleted_at IS NULL
            ORDER BY m.sent_at DESC
            LIMIT $3"#,
-        channel_id,
-        oldest,
-        CONTEXT_SIZE
-    )
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|r| (r.message_id, r.content, r.topic))
-    .collect();
+            channel_id,
+            msgs.iter()
+                .map(|m| m.sent_at)
+                .min()
+                .ok_or_eyre("Empty batch of messages passed")?,
+            CONTEXT_SIZE
+        )
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|r| (r.message_id, r.content, r.topic))
+        .collect();
 
-    context.reverse();
+    // We asked the db for the last CONTEXT_SIZE before the current batch, so they are new-old, but we want chronoloigical old-new order to make it easier for the LLM to process
+    message_id_content_topic_context_msgs.reverse();
 
+    // This section is just adding to the system message (giving the LLM context)
     let topics: Vec<String> = sqlx::query_scalar!("SELECT name FROM topic")
         .fetch_all(pool)
         .await?;
-    let new: Vec<(i64, String)> = msgs
-        .iter()
-        .map(|m| (m.message_id, m.content.clone()))
-        .collect();
 
-    let groups = llm::classify(http, base_url, api_key, model, &context, &new, &topics).await?;
-    tracing::debug!(group_count = groups.len(), "LLM returned groups");
+    let mut sys_msg = SYSTEM.to_string() + "\n";
+    if !topics.is_empty() {
+        sys_msg.push_str("Existing topics:\n");
+        for t in &topics {
+            sys_msg.push_str(&format!("- {t}\n"));
+        }
+        sys_msg.push('\n');
+    }
+    if !message_id_content_topic_context_msgs.is_empty() {
+        sys_msg.push_str("Earlier messages for context:\n");
+        for (id, content, topic) in &message_id_content_topic_context_msgs {
+            let c = content.replace('\n', " ");
+            match topic {
+                Some(t) => sys_msg.push_str(&format!("[{id}] (topic: {t}): {c}\n")),
+                None => sys_msg.push_str(&format!("[{id}]: {c}\n")),
+            }
+        }
+        sys_msg.push('\n');
+    }
+
+    let mut user_msg = String::new();
+    user_msg.push_str("New messages to classify:\n");
+    for m in msgs {
+        user_msg.push_str(&format!(
+            "[{}]: {}\n",
+            m.message_id,
+            m.content.replace('\n', " ")
+        ));
+    }
+
+    tracing::debug!(%model, user_msg_len = user_msg.len(), "sending classify request");
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "topic": { "type": "string" },
+                        "message_ids": { "type": "array", "items": { "type": "integer" } },
+                    },
+                    "required": ["topic", "message_ids"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["groups"],
+        "additionalProperties": false
+    });
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(model)
+        .messages([
+            ChatCompletionRequestSystemMessage::from(sys_msg).into(),
+            ChatCompletionRequestUserMessage::from(user_msg.as_str()).into(),
+        ])
+        .response_format(ResponseFormat::JsonSchema {
+            json_schema: ResponseFormatJsonSchema {
+                description: None,
+                name: "topic_groups".into(),
+                schema: Some(schema),
+                strict: Some(true),
+            },
+        })
+        .build()?;
+
+    let llm_response = client
+        .chat()
+        .create(request)
+        .await?
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.message.content)
+        .ok_or_else(|| eyre!("no content in LLM response"))?;
+
+    tracing::debug!(
+        content = llm_response.chars().take(50).collect::<String>(),
+        "received LLM response"
+    );
+
+    #[derive(Debug, Deserialize)]
+    pub struct LLMResponse {
+        pub groups: Vec<Group>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Group {
+        pub topic: String,
+        pub message_ids: Vec<i64>,
+    }
+
+    let groups: Vec<Group> = serde_json::from_str::<LLMResponse>(&llm_response)
+        .map_err(|e| eyre!("failed to parse LLM groups JSON: {e}\nraw: {llm_response}"))?
+        .groups;
+
     if groups.is_empty() {
-        tracing::debug!("no groups returned, skipping DB writes");
+        tracing::debug!("LLM returned no groups");
         return Ok(());
     }
 
-    let names: Vec<String> = groups.iter().map(|(t, _)| t.clone()).collect();
-    tracing::debug!(?names, "ensuring topics exist");
+    tracing::debug!(group_count = groups.len(), "applying groups");
 
-    let topic_map: HashMap<String, Uuid> = sqlx::query!(
-        r#"WITH new_topics AS (
-               INSERT INTO topic (name)
-               SELECT DISTINCT n FROM UNNEST($1::text[]) AS n
-               WHERE NOT EXISTS (SELECT 1 FROM topic WHERE name = n)
-               RETURNING id, name
-           )
-           SELECT id AS "id!", name AS "name!" FROM new_topics
-           UNION ALL
-           SELECT id, name FROM topic WHERE name = ANY($1)"#,
-        &names
-    )
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|r| (r.name, r.id))
-    .collect();
-
-    tracing::debug!(topic_map_len = topic_map.len(), "topic map built");
-
-    let mut tids: Vec<Uuid> = Vec::new();
-    let mut mids: Vec<i64> = Vec::new();
-    for (topic, ids) in &groups {
-        match topic_map.get(topic.as_str()) {
-            Some(&tid) => {
-                tracing::debug!(%topic, msg_count = ids.len(), "queuing assignments");
-                for &id in ids {
-                    tids.push(tid);
-                    mids.push(id);
-                }
-            }
-            None => tracing::warn!(%topic, "topic not found in map after upsert"),
+    let mut relations_inserted = 0;
+    for group in groups {
+        let topic_id = insert_topic(pool, &group.topic).await?;
+        for message_id in group.message_ids {
+            insert_topic_message_relation(pool, topic_id, message_id).await?;
+            relations_inserted += 1;
         }
     }
 
-    if tids.is_empty() {
-        tracing::debug!("no assignments to write");
-        return Ok(());
-    }
+    tracing::info!(relations_inserted, "applied topic groupings");
+    Ok(())
+}
 
-    tracing::debug!(pair_count = tids.len(), "inserting topic_message_relation rows");
-    let result = sqlx::query!(
+async fn insert_topic(pool: &PgPool, name: &str) -> color_eyre::Result<Uuid> {
+    let id = sqlx::query_scalar!(
+        r#"WITH inserted AS (
+               INSERT INTO topic (name)
+               SELECT $1
+               WHERE NOT EXISTS (SELECT 1 FROM topic WHERE name = $1)
+               RETURNING id
+           )
+           SELECT id AS "id!" FROM inserted
+           UNION ALL
+           SELECT id FROM topic WHERE name = $1
+           LIMIT 1"#,
+        name
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+//TODO: make 1 message assignable to more than 1 topic?
+async fn insert_topic_message_relation(
+    pool: &PgPool,
+    topic_id: Uuid,
+    message_id: i64,
+) -> color_eyre::Result<()> {
+    sqlx::query!(
         r#"INSERT INTO topic_message_relation (topic_id, message_id)
-           SELECT t.topic_id, t.message_id
-           FROM UNNEST($1::uuid[], $2::bigint[]) AS t(topic_id, message_id)
+           SELECT $1, $2
            WHERE NOT EXISTS (
-               SELECT 1 FROM topic_message_relation r
-               WHERE r.message_id = t.message_id
+               SELECT 1 FROM topic_message_relation
+               WHERE message_id = $2
            )"#,
-        &tids,
-        &mids
+        topic_id,
+        message_id
     )
     .execute(pool)
     .await?;
-
-    tracing::info!(rows_affected = result.rows_affected(), "inserted topic_message_relations");
     Ok(())
 }

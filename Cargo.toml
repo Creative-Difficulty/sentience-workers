@@ -1,5 +1,5 @@
 [workspace]
-members = ["ingest-vestibule-retriever", "topic-sorter"]
+members = ["fact-extractor","ingest-vestibule-retriever", "topic-sorter"]
 resolver = "2"
 
 [workspace.dependencies]

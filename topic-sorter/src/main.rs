@@ -1,10 +1,10 @@
 use std::env;
 
+use async_openai::{config::OpenAIConfig, Client};
 use color_eyre::eyre::WrapErr as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-mod llm;
 mod sorter;
 
 fn env_var(name: &str) -> color_eyre::Result<String> {
@@ -33,10 +33,11 @@ async fn main() -> color_eyre::Result<()> {
 
     tokio::fs::write("/tmp/ready", "1").await?;
 
-    let http = reqwest::Client::new();
-    let base_url = env_var("LLM_BASE_URL")?;
-    let api_key = env_var("LLM_API_KEY")?;
+    let config = OpenAIConfig::new()
+        .with_api_base(env_var("LLM_BASE_URL")?)
+        .with_api_key(env_var("LLM_API_KEY")?);
+    let client = Client::with_config(config);
     let model = env_var("LLM_MODEL")?;
 
-    sorter::run(&pool, &http, &base_url, &api_key, &model).await
+    sorter::run(&pool, &client, &model).await
 }

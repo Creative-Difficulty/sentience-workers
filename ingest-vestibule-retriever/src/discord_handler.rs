@@ -48,7 +48,7 @@ impl EventHandler for DiscordEventHandler {
         });
     }
 
-    #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
+    #[tracing::instrument(skip_all, fields(msg_id=msg.id.get(), channel_id=msg.channel_id.get()))]
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.guild_id != Some(self.guild_id) {
             return;
@@ -75,7 +75,7 @@ impl EventHandler for DiscordEventHandler {
         });
     }
 
-    #[tracing::instrument(skip_all, fields(msg_id=_event.id.get()))]
+    #[tracing::instrument(skip_all, fields(msg_id=_event.id.get(), channel_id=_event.channel_id.get()))]
     async fn message_update(
         &self,
         ctx: Context,
@@ -102,6 +102,7 @@ impl EventHandler for DiscordEventHandler {
         });
     }
 
+    // TODO still add channel id here even though we have to retrieve the channel manually and go through a result, for reaction remove too
     #[tracing::instrument(skip_all, fields(msg_id=add_reaction.message_id.get()))]
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
         let span = tracing::info_span!(
