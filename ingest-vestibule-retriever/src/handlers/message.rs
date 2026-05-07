@@ -4,8 +4,68 @@ use crate::handlers::channel::ensure_discord_channel;
 use crate::handlers::discord_user::ensure_user;
 use chrono::{TimeZone, Utc};
 use ormlite::Model as _;
-use serenity::all::Message;
+use serenity::all::{Message, MessageType};
 use unidb::models::Message as DbMessage;
+
+/// Returns a synthetic content string for system messages (joins, boosts, pins, ...).
+/// Returns `None` for regular messages/replies where the original content should be kept.
+fn system_message_content(msg: &Message) -> Option<String> {
+    let author = &msg.author.name;
+    let s = match msg.kind {
+        MessageType::Regular
+        | MessageType::InlineReply
+        | MessageType::ChatInputCommand
+        | MessageType::ContextMenuCommand => return None,
+        MessageType::GroupRecipientAddition => format!("{} added a recipient to the group", author),
+        MessageType::GroupRecipientRemoval => {
+            format!("{} removed a recipient from the group", author)
+        }
+        MessageType::GroupCallCreation => format!("{} started a call", author),
+        MessageType::GroupNameUpdate => format!("{} changed the group name", author),
+        MessageType::GroupIconUpdate => format!("{} changed the group icon", author),
+        MessageType::PinsAdd => format!("{} pinned a message", author),
+        MessageType::MemberJoin => format!("user {} joined the server", author),
+        MessageType::NitroBoost => format!("{} boosted the server", author),
+        MessageType::NitroTier1 => "the server reached Nitro Boost tier 1".to_string(),
+        MessageType::NitroTier2 => "the server reached Nitro Boost tier 2".to_string(),
+        MessageType::NitroTier3 => "the server reached Nitro Boost tier 3".to_string(),
+        MessageType::ChannelFollowAdd => format!("{} followed a news channel", author),
+        MessageType::GuildDiscoveryDisqualified => {
+            "the server was disqualified from Discovery".to_string()
+        }
+        MessageType::GuildDiscoveryRequalified => {
+            "the server was requalified for Discovery".to_string()
+        }
+        MessageType::GuildDiscoveryGracePeriodInitialWarning => {
+            "initial Discovery grace period warning".to_string()
+        }
+        MessageType::GuildDiscoveryGracePeriodFinalWarning => {
+            "final Discovery grace period warning".to_string()
+        }
+        MessageType::ThreadCreated => format!("{} created a thread", author),
+        MessageType::ThreadStarterMessage => "[thread starter message]".to_string(),
+        MessageType::GuildInviteReminder => "[guild invite reminder]".to_string(),
+        MessageType::AutoModAction => "[auto-moderation action]".to_string(),
+        MessageType::RoleSubscriptionPurchase => {
+            format!("{} purchased a role subscription", author)
+        }
+        MessageType::InteractionPremiumUpsell => "[interaction premium upsell]".to_string(),
+        MessageType::StageStart => "[stage started]".to_string(),
+        MessageType::StageEnd => "[stage ended]".to_string(),
+        MessageType::StageSpeaker => format!("{} is now a stage speaker", author),
+        MessageType::StageTopic => "[stage topic changed]".to_string(),
+        MessageType::GuildApplicationPremiumSubscription => {
+            "[application premium subscription]".to_string()
+        }
+        MessageType::GuildIncidentAlertModeEnabled => "[incident alert mode enabled]".to_string(),
+        MessageType::GuildIncidentAlertModeDisabled => "[incident alert mode disabled]".to_string(),
+        MessageType::GuildIncidentReportRaid => "[incident report: raid]".to_string(),
+        MessageType::GuildIncidentReportFalseAlarm => "[incident report: false alarm]".to_string(),
+        MessageType::PurchaseNotification => format!("{} made a purchase", author),
+        _ => return None,
+    };
+    Some(s)
+}
 
 /// Processes a single Discord message completely:
 ///   1. Inserts author if not in db (VestibuleUser + DiscordAccount)
@@ -101,7 +161,7 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         message_id: msg.id.get() as i64,
         channel_id: msg.channel_id.get() as i64,
         sent_by: msg.author.id.get() as i64,
-        content: msg.content.clone(),
+        content: system_message_content(msg).unwrap_or_else(|| msg.content.clone()),
         sent_at: *msg.timestamp,
         last_edited: msg.edited_timestamp.map(|t| *t),
         deleted_at: None,

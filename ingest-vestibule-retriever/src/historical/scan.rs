@@ -49,13 +49,17 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
                 }
             }
 
-            tracing::info!(
-                "Found {} messages in channel \"{}\", processing...",
-                all_messages.len(),
-                channel.name
-            );
+
+            if !all_messages.is_empty() {
+                tracing::info!(
+                    "Found {} messages in channel \"{}\", processing...",
+                    all_messages.len(),
+                    channel.name
+                );
+            }
 
             for msg in all_messages.iter().rev() {
+                tracing::trace!("Processing message {}", msg.id.get());
                 if let Err(e) = crate::handlers::ensure_message(&ctx, msg).await {
                     tracing::error!(error = %e, msg_id = msg.id.get(), "Failed to ensure message is in database");
                 }
