@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_openai::{
@@ -230,10 +230,21 @@ async fn classify_channel(
 
     tracing::debug!(group_count = groups.len(), "applying groups");
 
+    // Prevent LLM-hallucinated message IDs
+    let valid_ids: HashSet<i64> = msgs.iter().map(|m| m.message_id).collect();
+
     let mut relations_inserted = 0;
     for group in groups {
         let topic_id = insert_topic(pool, &group.topic).await?;
         for message_id in group.message_ids {
+            if !valid_ids.contains(&message_id) {
+                tracing::warn!(
+                    message_id,
+                    topic = %group.topic,
+                    "LLM returned unknown message_id, skipping"
+                );
+                continue;
+            }
             insert_topic_message_relation(pool, topic_id, message_id).await?;
             relations_inserted += 1;
         }
