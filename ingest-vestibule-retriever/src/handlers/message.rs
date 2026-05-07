@@ -78,7 +78,7 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
                         DbMessage {
                             message_id: in_reply_to,
                             channel_id: msg.channel_id.get() as i64,
-                            sent_by: 00000000000, // Fallback to current author since we don't know the original
+                            sent_by: 0000000000, // Fallback to 0000000000, this is a  dummy account inserted into unidb for this purpose
                             content: "[deleted message]".to_string(),
                             sent_at: Utc.timestamp_opt(0, 0).unwrap(), // Fallback to current timestamp
                             last_edited: None,
