@@ -2,8 +2,13 @@ pub mod discord_handler;
 pub mod handlers;
 pub mod historical;
 
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
+
 use serenity::all::Context;
 use sqlx::PgPool;
+
+pub type MessageIdCache = Arc<RwLock<HashSet<i64>>>;
 
 #[derive(Clone)]
 pub struct AppCtx {
@@ -11,6 +16,7 @@ pub struct AppCtx {
     pub s3_client: aws_sdk_s3::Client,
     pub s3_bucket: String,
     pub discord_ctx: Context,
+    pub message_id_cache: MessageIdCache,
 }
 
 // TODO Keep this around until impl of message deletion marking handler

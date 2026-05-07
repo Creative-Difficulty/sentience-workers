@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::env;
+use std::sync::{Arc, RwLock};
 
 use aws_sdk_s3::config::Credentials;
 use serenity::all::GatewayIntents;
@@ -19,6 +21,14 @@ async fn main() -> color_eyre::Result<()> {
         .await?;
     tracing::debug!("created database connection pool");
 
+    let existing_ids = sqlx::query_scalar!("SELECT message_id FROM messages")
+        .fetch_all(&db_pool)
+        .await?;
+    let id_count = existing_ids.len();
+    let message_id_cache: ingest_vestibule_retriever::MessageIdCache =
+        Arc::new(RwLock::new(existing_ids.into_iter().collect::<HashSet<i64>>()));
+    tracing::debug!(count = id_count, "loaded message ID cache from database");
+
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILDS
@@ -33,6 +43,7 @@ async fn main() -> color_eyre::Result<()> {
         s3_bucket: env_vars.s3_bucket_name,
         intro_channel_id: serenity::all::ChannelId::new(env_vars.discord_intro_channel_id),
         guild_id: serenity::all::GuildId::new(env_vars.discord_guild_id),
+        message_id_cache,
     };
 
     let mut client = serenity::Client::builder(&env_vars.discord_token, intents)
@@ -50,9 +61,10 @@ async fn main() -> color_eyre::Result<()> {
 }
 
 fn setup_tracing() -> color_eyre::Result<()> {
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(format!("{}=trace,serenity=off", env!("CARGO_CRATE_NAME")).parse()?)
-        .from_env_lossy();
+    let default_filter = format!("{}=trace,serenity=off", env!("CARGO_CRATE_NAME"));
+    let env_filter = tracing_subscriber::EnvFilter::try_new(
+        std::env::var("RUST_LOG").unwrap_or(default_filter),
+    )?;
 
     let subscriber = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())

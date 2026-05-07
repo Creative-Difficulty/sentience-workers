@@ -3,9 +3,7 @@ use crate::handlers::attachments::{insert_message_attachments, insert_stickers};
 use crate::handlers::channel::ensure_discord_channel;
 use crate::handlers::discord_user::ensure_user;
 use chrono::{TimeZone, Utc};
-use ormlite::Model as _;
 use serenity::all::{Message, MessageType};
-use unidb::models::Message as DbMessage;
 
 /// Returns a synthetic content string for system messages (joins, boosts, pins, ...).
 /// Returns `None` for regular messages/replies where the original content should be kept.
@@ -75,13 +73,11 @@ fn system_message_content(msg: &Message) -> Option<String> {
 ///
 /// Used by both the live `EventHandler` and `historical_scan`.
 pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
-    if sqlx::query!(
-        "SELECT message_id FROM messages WHERE message_id = $1",
-        msg.id.get() as i64
-    )
-    .fetch_optional(&ctx.db_pool)
-    .await?
-    .is_some()
+    if ctx
+        .message_id_cache
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&(msg.id.get() as i64))
     {
         return Ok(());
     }
@@ -102,13 +98,14 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         .as_ref()
         .and_then(|r| r.message_id.map(|id| id.get() as i64));
 
+    #[allow(clippy::collapsible_if)]
     if let Some(in_reply_to) = in_reply_to {
-        let exists =
-            sqlx::query_scalar!("SELECT 1 FROM messages WHERE message_id = $1", in_reply_to)
-                .fetch_optional(&ctx.db_pool)
-                .await?;
-
-        if exists.is_none() {
+        if !ctx
+            .message_id_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&in_reply_to)
+        {
             match ctx
                 .discord_ctx
                 .http
@@ -135,19 +132,26 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
                             msg_id = in_reply_to,
                             "Parent message not found on Discord, inserting placeholder"
                         );
-                        DbMessage {
-                            message_id: in_reply_to,
-                            channel_id: msg.channel_id.get() as i64,
-                            sent_by: 0000000000, // Fallback to 0000000000, this is a  dummy account inserted into unidb for this purpose
-                            content: "[deleted message]".to_string(),
-                            sent_at: Utc.timestamp_opt(0, 0).unwrap(), // Fallback to current timestamp
-                            last_edited: None,
-                            deleted_at: Some(Utc.timestamp_opt(0, 0).unwrap()),
-                            in_reply_to: None,
-                            added_at: chrono::Utc::now(),
-                        }
-                        .insert(&ctx.db_pool)
+                        sqlx::query!(
+                            "INSERT INTO messages (message_id, channel_id, sent_by, content, sent_at, last_edited, deleted_at, in_reply_to, added_at)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                             ON CONFLICT (message_id) DO NOTHING",
+                            in_reply_to,
+                            msg.channel_id.get() as i64,
+                            0000000000, // Fallback to 0000000000, this is a  dummy account inserted into unidb for this purpose
+                            "[deleted message]",
+                            Utc.timestamp_opt(0, 0).unwrap(),
+                            Option::<chrono::DateTime<Utc>>::None,
+                            Utc.timestamp_opt(0, 0).unwrap(),
+                            Option::<i64>::None,
+                            chrono::Utc::now()
+                        )
+                        .execute(&ctx.db_pool)
                         .await?;
+                        ctx.message_id_cache
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(in_reply_to);
                     } else {
                         return Err(serenity::Error::Http(http_err).into());
                     }
@@ -157,19 +161,27 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         }
     }
 
-    DbMessage {
-        message_id: msg.id.get() as i64,
-        channel_id: msg.channel_id.get() as i64,
-        sent_by: msg.author.id.get() as i64,
-        content: system_message_content(msg).unwrap_or_else(|| msg.content.clone()),
-        sent_at: *msg.timestamp,
-        last_edited: msg.edited_timestamp.map(|t| *t),
-        deleted_at: None,
+    let content = system_message_content(msg).unwrap_or_else(|| msg.content.clone());
+    sqlx::query!(
+        "INSERT INTO messages (message_id, channel_id, sent_by, content, sent_at, last_edited, deleted_at, in_reply_to, added_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (message_id) DO NOTHING",
+        msg.id.get() as i64,
+        msg.channel_id.get() as i64,
+        msg.author.id.get() as i64,
+        content,
+        *msg.timestamp,
+        msg.edited_timestamp.map(|t| *t),
+        Option::<chrono::DateTime<Utc>>::None,
         in_reply_to,
-        added_at: chrono::Utc::now(),
-    }
-    .insert(&ctx.db_pool)
+        chrono::Utc::now()
+    )
+    .execute(&ctx.db_pool)
     .await?;
+    ctx.message_id_cache
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(msg.id.get() as i64);
 
     if !msg.attachments.is_empty() {
         if let Err(e) = insert_message_attachments(ctx, msg).await {
