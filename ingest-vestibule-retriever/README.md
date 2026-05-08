@@ -23,6 +23,6 @@ If you don't want to set up Postgres yourself, supabase is a great option which 
 
 To get a `DISCORD_TOKEN`, go to <https://discord.com/developers/applications> and create an application, and follow this tutorial on how to get a discord bot token: <https://discordgsm.com/guide/how-to-get-a-discord-bot-token>.
 
-Set `GUILD_ID` to the guild (discord-speak for server) id, This is a good tutorial on how to get this value: <https://tokenizedhq.com/discord-server-id/>
+Set `GUILD_ID` to the guild (discord-speak for server) id. This is a good tutorial on how to get this value: <https://tokenizedhq.com/discord-server-id/>
 
 The easiest way to run/deploy all services (including the vestibule-retriever) is to use docker compose (`docker compose up -d`, -d for `detached`, running in the background).

@@ -5,12 +5,12 @@ A program that ingests a Discord server's content and uses LLMs to extract per-u
 ## Project structure
 
 - `ingest-vestibule-retriever` - ingest discord bot
-- `fact-extractor` - Extracts facts about users, activities the users did and emotional traits from discord messages using an LLM
-- `topic-sorter` - Categorizes discord messages into categories which are created adhoc, message "meaning" extraction and topic determination both using an LLM
+- `fact-extractor` - Extracts facts about users, activities the users did, and emotions from discord messages using an LLM
+- `topic-sorter` - Sorts discord messages into topics which are created ad hoc; message "meaning" extraction and topic determination both use an LLM
 
 ## Setup and Deployment
 
-All 3 services are dockerized. The easiest way to run/deploy all of them (including the vestibule-retriever) is to use docker compose (`docker compose up -d`, -d for `detached`, running in the background).
+All three services are dockerized. The easiest way to run/deploy all of them (including the vestibule-retriever) is to use docker compose (`docker compose up -d`, -d for `detached`, running in the background).
 
 If you prefer not to use docker, ensure you have:
 
