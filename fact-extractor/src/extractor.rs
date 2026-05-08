@@ -262,8 +262,18 @@ async fn process_message(
     let context = fetch_context(pool, msg).await?;
     tracing::debug!(context_len = context.len(), "fetched surrounding context");
 
-    let request = build_extract_llm_request(model, msg, &context)?;
-    tracing::debug!(%model, msg_len = msg.content.len(), "sending extract request");
+    let has_attachments = sqlx::query_scalar!(
+        r#"SELECT EXISTS(
+               SELECT 1 FROM message_attachments
+               WHERE message_id = $1 AND deleted_at IS NULL
+           ) AS "exists!""#,
+        msg.message_id,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let request = build_extract_llm_request(model, msg, &context, has_attachments)?;
+    tracing::debug!(%model, msg_len = msg.content.len(), has_attachments, "sending extract request");
 
     let raw = client
         .chat()
@@ -312,16 +322,16 @@ async fn process_message(
     Ok(())
 }
 
-async fn fetch_context(pool: &PgPool, focal: &Message) -> color_eyre::Result<Vec<Message>> {
+async fn fetch_context(pool: &PgPool, focal_msg: &Message) -> color_eyre::Result<Vec<Message>> {
     let mut before = sqlx::query_as!(
         Message,
         r#"SELECT m.* FROM messages m
            WHERE m.channel_id = $1 AND m.sent_at < $2 AND m.message_id != $3 AND m.deleted_at IS NULL
            ORDER BY m.sent_at DESC
            LIMIT $4"#,
-        focal.channel_id,
-        focal.sent_at,
-        focal.message_id,
+        focal_msg.channel_id,
+        focal_msg.sent_at,
+        focal_msg.message_id,
         CONTEXT_SIZE,
     )
     .fetch_all(pool)
@@ -334,9 +344,9 @@ async fn fetch_context(pool: &PgPool, focal: &Message) -> color_eyre::Result<Vec
            WHERE m.channel_id = $1 AND m.sent_at > $2 AND m.message_id != $3 AND m.deleted_at IS NULL
            ORDER BY m.sent_at ASC
            LIMIT $4"#,
-        focal.channel_id,
-        focal.sent_at,
-        focal.message_id,
+        focal_msg.channel_id,
+        focal_msg.sent_at,
+        focal_msg.message_id,
         CONTEXT_SIZE,
     )
     .fetch_all(pool)
@@ -347,7 +357,7 @@ async fn fetch_context(pool: &PgPool, focal: &Message) -> color_eyre::Result<Vec
     Ok(all)
 }
 
-fn build_system_prompt(context: &[Message], focal: &Message) -> String {
+fn build_system_prompt(context: &[Message], focal_msg: &Message, has_attachments: bool) -> String {
     let now = Utc::now();
     let mut prompt = format!(
         "{}\nCurrent time: {}\nToday: {}\n",
@@ -356,12 +366,21 @@ fn build_system_prompt(context: &[Message], focal: &Message) -> String {
         now.format("%A, %B %-d, %Y")
     );
 
+    if has_attachments {
+        prompt.push_str(
+            r#"# Attachments present
+             The focal message has one or more attachments (image, video, file, etc.) that you cannot see.
+             The author may be captioning, describing, or reacting to the attachment rather than making a first-person claim about themselves or anyone else.
+             When something the author says could plausibly be a description of the attachment instead of a durable fact about them, abstain — do NOT emit a record."#,
+        );
+    }
+
     if !context.is_empty() {
         prompt.push_str(&format!(
             "\n# Surrounding messages (context only — do NOT extract from these)\n\
              Nearby messages from the same channel. Use them only to disambiguate references in the focal message. \
              Extract facts ONLY about the focal author (sent_by={}).\n\n",
-            focal.sent_by
+            focal_msg.sent_by
         ));
         for m in context {
             let c = m.content.replace('\n', " ");
@@ -380,14 +399,20 @@ fn build_system_prompt(context: &[Message], focal: &Message) -> String {
 
 fn build_extract_llm_request(
     model: &str,
-    focal: &Message,
+    focal_msg: &Message,
     context: &[Message],
+    has_attachments: bool,
 ) -> color_eyre::Result<CreateChatCompletionRequest> {
     let request = CreateChatCompletionRequestArgs::default()
         .model(model)
         .messages([
-            ChatCompletionRequestSystemMessage::from(build_system_prompt(context, focal)).into(),
-            ChatCompletionRequestUserMessage::from(focal.content.as_str()).into(),
+            ChatCompletionRequestSystemMessage::from(build_system_prompt(
+                context,
+                focal_msg,
+                has_attachments,
+            ))
+            .into(),
+            ChatCompletionRequestUserMessage::from(focal_msg.content.as_str()).into(),
         ])
         .response_format(ResponseFormat::JsonSchema {
             json_schema: ResponseFormatJsonSchema {
