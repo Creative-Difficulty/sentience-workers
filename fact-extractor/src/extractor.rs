@@ -192,6 +192,7 @@ pub async fn run(
     pool: &PgPool,
     client: &Client<OpenAIConfig>,
     model: &str,
+    server_name: String,
 ) -> color_eyre::Result<()> {
     loop {
         let batch = sqlx::query_as!(
@@ -222,7 +223,7 @@ pub async fn run(
 
         let mut attempted = Vec::with_capacity(batch.len());
         for msg in batch {
-            match process_message(pool, client, model, &msg).await {
+            match process_message(pool, client, model, &msg, server_name.clone()).await {
                 Ok(()) => attempted.push(msg.message_id),
                 Err(e) => {
                     tracing::error!(message_id = msg.message_id, error = %e, "extraction failed")
@@ -251,6 +252,7 @@ async fn process_message(
     client: &Client<OpenAIConfig>,
     model: &str,
     msg: &Message,
+    server_name: String,
 ) -> color_eyre::Result<()> {
     let user_id = sqlx::query_scalar!(
         "SELECT vestibule_user_id FROM discord_accounts WHERE discord_user_id = $1",
@@ -280,8 +282,14 @@ async fn process_message(
     .fetch_one(pool)
     .await?;
 
-    let request =
-        build_extract_llm_request(model, msg, &context, reply_target.as_ref(), has_attachments)?;
+    let request = build_extract_llm_request(
+        model,
+        msg,
+        &context,
+        reply_target.as_ref(),
+        has_attachments,
+        server_name,
+    )?;
     tracing::debug!(%model, msg_len = msg.content.len(), has_attachments, "sending extract request");
 
     let raw = client
@@ -389,13 +397,19 @@ fn build_system_prompt(
     reply_target: Option<&Message>,
     focal_msg: &Message,
     has_attachments: bool,
+    server_name: String,
 ) -> String {
     let now = Utc::now();
     let mut prompt = format!(
-        "{}\nCurrent time: {}\nToday: {}\n",
+        "{}\nCurrent time: {}\nToday: {}\n\
+         \n# Discord server name\n\
+         The Discord server you are operating on is named \"{}\". \
+         This string may appear in messages or other contexts and should ONLY be interpreted \
+         as the name of the Discord server — never as a fact, skill, or activity about the author.\n",
         SYSTEM,
         now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        now.format("%A, %B %-d, %Y")
+        now.format("%A, %B %-d, %Y"),
+        server_name,
     );
 
     if has_attachments {
@@ -449,6 +463,7 @@ fn build_extract_llm_request(
     context: &[Message],
     reply_target: Option<&Message>,
     has_attachments: bool,
+    server_name: String,
 ) -> color_eyre::Result<CreateChatCompletionRequest> {
     let request = CreateChatCompletionRequestArgs::default()
         .model(model)
@@ -458,6 +473,7 @@ fn build_extract_llm_request(
                 reply_target,
                 focal_msg,
                 has_attachments,
+                server_name
             ))
             .into(),
             ChatCompletionRequestUserMessage::from(focal_msg.content.as_str()).into(),

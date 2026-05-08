@@ -24,13 +24,22 @@ async fn main() -> color_eyre::Result<()> {
         .wrap_err("failed to connect to DATABASE_URL")?;
     tracing::debug!("created database connection pool");
 
-    let llm_client = build_llm_client(&env_vars);
+    let llm_client_config = OpenAIConfig::new()
+        .with_api_base(&env_vars.llm_base_url)
+        .with_api_key(&env_vars.llm_api_key);
+    let llm_client = Client::with_config(llm_client_config);
+
     tracing::debug!("built LLM client");
 
     tokio::fs::write("/tmp/ready", "1").await?;
     tracing::debug!("wrote readiness file to /tmp/ready");
-
-    extractor::run(&db_pool, &llm_client, &env_vars.llm_model).await
+    extractor::run(
+        &db_pool,
+        &llm_client,
+        &env_vars.llm_model,
+        env_vars.dircord_server_name,
+    )
+    .await
 }
 
 fn setup_tracing() -> color_eyre::Result<()> {
@@ -52,6 +61,7 @@ struct EnvVars {
     llm_base_url: String,
     llm_api_key: String,
     llm_model: String,
+    dircord_server_name: String,
 }
 
 fn get_env_vars() -> color_eyre::Result<EnvVars> {
@@ -60,12 +70,6 @@ fn get_env_vars() -> color_eyre::Result<EnvVars> {
         llm_base_url: env::var("LLM_BASE_URL")?,
         llm_api_key: env::var("LLM_API_KEY")?,
         llm_model: env::var("LLM_MODEL")?,
+        dircord_server_name: env::var("DISCORD_SERVER_NAME")?,
     })
-}
-
-fn build_llm_client(env_vars: &EnvVars) -> Client<OpenAIConfig> {
-    let config = OpenAIConfig::new()
-        .with_api_base(&env_vars.llm_base_url)
-        .with_api_key(&env_vars.llm_api_key);
-    Client::with_config(config)
 }
