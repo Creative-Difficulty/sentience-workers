@@ -65,7 +65,6 @@ async fn main() -> color_eyre::Result<()> {
         db_pool,
         s3_client,
         s3_bucket: env_vars.s3_bucket_name,
-        intro_channel_id: serenity::all::ChannelId::new(env_vars.discord_intro_channel_id),
         guild_id: serenity::all::GuildId::new(env_vars.discord_guild_id),
         message_id_cache,
         channel_id_cache,
@@ -104,7 +103,6 @@ struct EnvVars {
     discord_token: String,
     db_url: String,
     discord_guild_id: u64,
-    discord_intro_channel_id: u64,
     s3_url: String,
     s3_access_key_id: String,
     s3_secret_access_key: String,
@@ -115,7 +113,6 @@ fn get_env_vars() -> color_eyre::Result<EnvVars> {
     let discord_token = env::var("DISCORD_TOKEN")?;
     let db_url = env::var("DATABASE_URL")?;
     let discord_guild_id = env::var("GUILD_ID")?.parse::<u64>()?;
-    let discord_intro_channel_id = env::var("DISCORD_INTRO_CHANNEL_ID")?.parse::<u64>()?;
     let s3_url = env::var("S3_URL")?.parse::<String>()?;
 
     let s3_access_key_id = env::var("S3_ACCESS_KEY_ID")?.parse::<String>()?;
@@ -128,7 +125,6 @@ fn get_env_vars() -> color_eyre::Result<EnvVars> {
         discord_token,
         db_url,
         discord_guild_id,
-        discord_intro_channel_id,
         s3_url,
         s3_access_key_id,
         s3_secret_access_key,

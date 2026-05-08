@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{AppCtx, IdCache};
 use serenity::{
-    all::{ChannelId, Context, EventHandler, GuildId, Message, Reaction},
+    all::{Context, EventHandler, GuildId, Message, Reaction},
     async_trait,
 };
 use sqlx::PgPool;
@@ -11,7 +11,6 @@ pub struct DiscordEventHandler {
     pub db_pool: PgPool,
     pub s3_client: aws_sdk_s3::Client,
     pub s3_bucket: String,
-    pub intro_channel_id: ChannelId,
     pub guild_id: GuildId,
     pub message_id_cache: IdCache,
     pub channel_id_cache: IdCache,
@@ -55,7 +54,6 @@ impl EventHandler for DiscordEventHandler {
         }
 
         let app_ctx = self.ctx(ctx);
-        let intro_channel_id = self.intro_channel_id;
 
         tokio::spawn(async move {
             let span = tracing::info_span!("process_message_task", msg_id = msg.id.get());
@@ -65,10 +63,6 @@ impl EventHandler for DiscordEventHandler {
 
             if let Err(e) = crate::handlers::ensure_message(&app_ctx, &msg).await {
                 tracing::error!(error = %e, "Handler failed for message");
-            }
-
-            if msg.channel_id == intro_channel_id {
-                tracing::info!("Received message in intro channel");
             }
 
             tracing::debug!("finished task");

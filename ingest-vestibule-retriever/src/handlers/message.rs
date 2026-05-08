@@ -86,7 +86,7 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
 
     ensure_user(ctx, &msg.author).await?;
 
-    // TODO When its all done, how do we make sure every messages' `in_reply_to` message is acutally in the db: Insert messgaes by first sent = first inserted
+    // TODO When its all done, how do we make sure every messages' `in_reply_to` message is actually in the db: Insert messages by first sent = first inserted
     let in_reply_to = msg
         .message_reference
         .as_ref()

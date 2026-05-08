@@ -45,7 +45,7 @@ pub async fn insert_all_reactions_for_message(
             match crate::handlers::ensure_user(ctx, &user).await {
                 Ok(_) => (),
                 Err(e) => {
-                    tracing::error!(error = %e, "Could not ensure user is alrady in the db when inserting reaction");
+                    tracing::error!(error = %e, "Could not ensure user is already in the db when inserting reaction");
                     continue;
                 }
             }

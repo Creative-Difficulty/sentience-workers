@@ -285,7 +285,7 @@ async fn classify_channel(
     Ok(())
 }
 
-// TODO does this error out on topic alrady exists or just returns the existing topics id?
+// TODO does this error out on topic already exists or just returns the existing topics id?
 async fn insert_topic(pool: &PgPool, name: &str) -> color_eyre::Result<Uuid> {
     let id = sqlx::query_scalar!(
         r#"WITH inserted AS (
