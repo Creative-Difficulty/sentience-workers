@@ -62,7 +62,35 @@ version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f704d052a4d91b1da811d7868f274eec9a9f78658793fc25faae077a1455332"
 dependencies = [
- "async-openai-macros",
+ "async-openai-macros 0.2.0",
+ "base64",
+ "bytes",
+ "derive_builder",
+ "eventsource-stream",
+ "futures",
+ "getrandom 0.3.4",
+ "rand 0.9.4",
+ "reqwest 0.13.3",
+ "secrecy 0.10.3",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "async-openai"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "322adbd4772f41a55fd30c10b924a30cf557ce65bbe7ebacda5a068404645604"
+dependencies = [
+ "async-openai-macros 0.3.0",
  "base64",
  "bytes",
  "derive_builder",
@@ -89,6 +117,17 @@ name = "async-openai-macros"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3441703ed54a806faf69c99f4fb29247827bd5440ae5a418659a4ac620bb0a08"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "async-openai-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "492a944774207eed3acf425214eadbd6ce84a2b89331164ff1c11bae92b26302"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1316,6 +1355,7 @@ dependencies = [
 name = "fact-extractor"
 version = "0.1.0"
 dependencies = [
+ "async-openai 0.38.0",
  "base64",
  "chrono",
  "color-eyre",
@@ -1323,6 +1363,8 @@ dependencies = [
  "hex",
  "ormlite",
  "reqwest 0.13.3",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",
@@ -4273,7 +4315,7 @@ dependencies = [
 name = "topic-sorter"
 version = "0.1.0"
 dependencies = [
- "async-openai",
+ "async-openai 0.37.0",
  "chrono",
  "color-eyre",
  "dotenvy",

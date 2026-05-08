@@ -15,11 +15,42 @@ use sqlx::PgPool;
 use unidb::Message;
 use uuid::Uuid;
 
-const SYSTEM: &str = "You group chat messages by topic.
-Topic labels should be 1–5 words, lowercase, and describe what the messages are about rather than restating them.
-Reuse existing topic names when new messages continue a known topic.
-Skip messages that don't clearly belong to any multi-message topic (acknowledgments, system messages, one-off remarks).
-Only emit a group when at least two messages share that topic across the whole window, never emit a singleton group.";
+const SYSTEM: &str = r#"
+Return JSON only. No prose, no code fences.
+
+Group chat messages by topic.
+
+Rules:
+- Topic labels: 1–5 words, lowercase, descriptive not restating. E.g. "rust borrow checker", "lunch logistics".
+- Reuse the same label for continuations of one topic; don't invent variants.
+- Skip greetings, acknowledgments, jokes, one-offs, system messages.
+- Only emit a group with 2+ messages. Never emit singletons.
+- Each message belongs to at most one group. Group by topic, not adjacency — interleaved threads still group together.
+- `message_ids` must use the exact integer IDs from the input. Don't invent, reorder, or omit.
+
+Schema:
+{
+  "groups": [
+    { "topic": "<string, 1-5 words lowercase>", "message_ids": [<int>, <int>, ...] }
+  ]
+}
+
+If nothing groups, return: { "groups": [] }
+No other keys. No null, comments, or trailing commas.
+
+Good example:
+Input:
+1: "ramen spot near the office?"
+2: "morning all"
+3: "ichiran on 5th is solid"
+4: "deploy failed last night"
+5: "migration didn't run"
+6: "tonkotsu at menya is better"
+7: "thanks!"
+8: "rolling back the migration"
+
+Output:
+{"groups":[{"topic":"ramen recommendations","message_ids":[1,3,6]},{"topic":"deploy failure","message_ids":[4,5,8]}]}"#;
 
 const BATCH_SIZE: i64 = 50;
 const CONTEXT_SIZE: i64 = 50;
@@ -220,7 +251,7 @@ async fn classify_channel(
     }
 
     let groups: Vec<Group> = serde_json::from_str::<LLMResponse>(&llm_response)
-        .map_err(|e| eyre!("failed to parse LLM groups JSON: {e}\nraw: {llm_response}"))?
+        .map_err(|e| eyre!("failed to parse LLM JSON for a message group under one topic: {e}\nraw: {llm_response}"))?
         .groups;
 
     if groups.is_empty() {
@@ -254,6 +285,7 @@ async fn classify_channel(
     Ok(())
 }
 
+// TODO does this error out on topic alrady exists or just returns the existing topics id?
 async fn insert_topic(pool: &PgPool, name: &str) -> color_eyre::Result<Uuid> {
     let id = sqlx::query_scalar!(
         r#"WITH inserted AS (
