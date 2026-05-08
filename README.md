@@ -14,7 +14,14 @@ Each microservice has its own README describing the service in greater detail, c
 
 ## Deployment
 
-All three services are dockerized. The easiest way to run/deploy all of them is to use docker compose (`docker compose up -d`, -d for `detached`, running in the background).
+All three services are dockerized. The easiest way to run/deploy all of them is to use docker compose.
+
+Before starting the stack, copy `.env.example` to `.env` and fill in the values. In particular, pick a `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY`, these are the S3 access-key / secret-key pairs that rustfs uses for both its admin console (at <http://localhost:9001>) and as the S3 credentials the apps use to read/write objects. You don't need to generate anything in the rustfs console first; whatever values you put in `.env` *are* the credentials.
+
+> [!IMPORTANT]
+> Pick these values once and don't change them after first start. RustFS encrypts its IAM config with the initial secret key and refuses to start with different credentials later (`crypto: decrypt failed`). Rotating them requires wiping the `rustfs_data` docker volume, which deletes all stored objects.
+
+Then run `docker compose --profile app up -d` (`-d` for `detached`, running in the background).
 
 ### Non-Docker Installation/Deployment
 

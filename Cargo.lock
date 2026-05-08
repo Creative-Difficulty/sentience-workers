@@ -4582,7 +4582,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 [[package]]
 name = "unidb"
 version = "0.3.0"
-source = "git+https://github.com/Vimothy-s-Vestibule/unidb-schema#f63519f08cf6a5b14fc253efa44d39c07081c0fc"
+source = "git+https://github.com/Vimothy-s-Vestibule/unidb-schema#a7a7c55458aef4f1bef899c4527af3559a925033"
 dependencies = [
  "chrono",
  "ormlite",
