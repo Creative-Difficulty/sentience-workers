@@ -282,6 +282,13 @@ async fn process_message(
     .fetch_one(pool)
     .await?;
 
+    let channel_name = sqlx::query_scalar!(
+        "SELECT name FROM discord_channels WHERE channel_id = $1",
+        msg.channel_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
     let request = build_extract_llm_request(
         model,
         msg,
@@ -289,6 +296,7 @@ async fn process_message(
         reply_target.as_ref(),
         has_attachments,
         server_name,
+        channel_name,
     )?;
     tracing::debug!(%model, msg_len = msg.content.len(), has_attachments, "sending extract request");
 
@@ -398,6 +406,7 @@ fn build_system_prompt(
     focal_msg: &Message,
     has_attachments: bool,
     server_name: String,
+    channel_name: Option<String>,
 ) -> String {
     let now = Utc::now();
     let mut prompt = format!(
@@ -411,6 +420,22 @@ fn build_system_prompt(
         now.format("%A, %B %-d, %Y"),
         server_name,
     );
+
+    if let Some(ref name) = channel_name {
+        prompt.push_str(&format!(
+            "\n# Discord channel name\n\
+             The focal message was sent in the Discord channel named \"{}\". \
+             This string may appear in messages or other contexts and should ONLY be interpreted \
+             as the name of the Discord channel the message was sent in — never as a fact, skill, \
+             or activity about the author.\n",
+            name,
+        ));
+    } else {
+        tracing::error!(
+            msg_id = focal_msg.message_id,
+            "Channel that the focal message was sent in is not in the database"
+        );
+    }
 
     if has_attachments {
         prompt.push_str(
@@ -464,6 +489,7 @@ fn build_extract_llm_request(
     reply_target: Option<&Message>,
     has_attachments: bool,
     server_name: String,
+    channel_name: Option<String>,
 ) -> color_eyre::Result<CreateChatCompletionRequest> {
     let request = CreateChatCompletionRequestArgs::default()
         .model(model)
@@ -473,7 +499,8 @@ fn build_extract_llm_request(
                 reply_target,
                 focal_msg,
                 has_attachments,
-                server_name
+                server_name,
+                channel_name,
             ))
             .into(),
             ChatCompletionRequestUserMessage::from(focal_msg.content.as_str()).into(),
