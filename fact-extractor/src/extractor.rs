@@ -259,8 +259,16 @@ async fn process_message(
     .fetch_one(pool)
     .await?;
 
-    let context = fetch_context(pool, msg).await?;
-    tracing::debug!(context_len = context.len(), "fetched surrounding context");
+    let reply_target = fetch_reply_target(pool, msg).await?;
+    let mut context = fetch_context(pool, msg).await?;
+    if let Some(ref rt) = reply_target {
+        context.retain(|c| c.message_id != rt.message_id);
+    }
+    tracing::debug!(
+        context_len = context.len(),
+        has_reply_target = reply_target.is_some(),
+        "fetched surrounding context"
+    );
 
     let has_attachments = sqlx::query_scalar!(
         r#"SELECT EXISTS(
@@ -272,7 +280,8 @@ async fn process_message(
     .fetch_one(pool)
     .await?;
 
-    let request = build_extract_llm_request(model, msg, &context, has_attachments)?;
+    let request =
+        build_extract_llm_request(model, msg, &context, reply_target.as_ref(), has_attachments)?;
     tracing::debug!(%model, msg_len = msg.content.len(), has_attachments, "sending extract request");
 
     let raw = client
@@ -357,7 +366,30 @@ async fn fetch_context(pool: &PgPool, focal_msg: &Message) -> color_eyre::Result
     Ok(all)
 }
 
-fn build_system_prompt(context: &[Message], focal_msg: &Message, has_attachments: bool) -> String {
+async fn fetch_reply_target(
+    pool: &PgPool,
+    focal_msg: &Message,
+) -> color_eyre::Result<Option<Message>> {
+    let Some(reply_id) = focal_msg.in_reply_to else {
+        return Ok(None);
+    };
+    let target = sqlx::query_as!(
+        Message,
+        r#"SELECT m.* FROM messages m
+           WHERE m.message_id = $1 AND m.deleted_at IS NULL"#,
+        reply_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(target)
+}
+
+fn build_system_prompt(
+    context: &[Message],
+    reply_target: Option<&Message>,
+    focal_msg: &Message,
+    has_attachments: bool,
+) -> String {
     let now = Utc::now();
     let mut prompt = format!(
         "{}\nCurrent time: {}\nToday: {}\n",
@@ -373,6 +405,20 @@ fn build_system_prompt(context: &[Message], focal_msg: &Message, has_attachments
              The author may be captioning, describing, or reacting to the attachment rather than making a first-person claim about themselves or anyone else.
              When something the author says could plausibly be a description of the attachment instead of a durable fact about them, abstain — do NOT emit a record."#,
         );
+    }
+
+    if let Some(rt) = reply_target {
+        let c = rt.content.replace('\n', " ");
+        prompt.push_str(&format!(
+            "\n# Replying to\n\
+             The focal message is a reply to the message below. The author may be addressing or referencing it directly — \
+             facts in the focal message may only make sense in light of it. Do NOT extract facts from the replied-to message itself.\n\
+             [{}] sent_by={} at {}: {}\n",
+            rt.message_id,
+            rt.sent_by,
+            rt.sent_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            c,
+        ));
     }
 
     if !context.is_empty() {
@@ -401,6 +447,7 @@ fn build_extract_llm_request(
     model: &str,
     focal_msg: &Message,
     context: &[Message],
+    reply_target: Option<&Message>,
     has_attachments: bool,
 ) -> color_eyre::Result<CreateChatCompletionRequest> {
     let request = CreateChatCompletionRequestArgs::default()
@@ -408,6 +455,7 @@ fn build_extract_llm_request(
         .messages([
             ChatCompletionRequestSystemMessage::from(build_system_prompt(
                 context,
+                reply_target,
                 focal_msg,
                 has_attachments,
             ))
