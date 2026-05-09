@@ -10,7 +10,7 @@ This will look like the bot is adding them to the database again and again, but 
 
 The re-indexing process should be fairly quick, but it depends on how many messages are in the server (throughput for reindexing is about 10 messages/second).
 
-## Environment varibles
+## Environment variables
 
 Create a `.env` file and copy the contents of the `.env.example` file into it and populate it with your own values.
 
@@ -19,7 +19,7 @@ fill in the credentials you got from your S3 bucket into the fields which start 
 I use `rustfs` as a self-hosted S3 implementation, however you can of course opt to use any S3 implementation.
 
 > [!WARNING]
-> Note that the S3 region parameter is hardcoded to `yo-mama` in the code, as rustfs does not check the s3 region parameter, only its existance.
+> Note that the S3 region parameter is hardcoded to `yo-mama` in the code, as rustfs does not check the s3 region parameter, only its existence.
 
 Make sure your `DATABASE_URL` is the full connection string including all credentials (Ends with `/postgres` on supabase).
 Also ensure that your instance of Postgres has the pgvector extension installed.
