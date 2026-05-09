@@ -6,7 +6,7 @@ This microservice groups messages from the postgres (unidb) database into topics
 
 Create a `.env` file and copy the contents of the `.env.example` file into it and populate it with your own values.
 
-Make sure your `DATABASE_URL` is the full connection string including all credentials (Ends with `/postgres` on supabase).
+Make sure your `DATABASE_URL` is the full connection string including all credentials (Ends with `/postgres` on supabase). This is the format it should follow: `postgres://user:password@host:port/db-name`.
 Also ensure that your instance of Postgres has the pgvector extension installed.
 If you don't want to set up Postgres yourself, supabase is a great option which I've been using during development.
 

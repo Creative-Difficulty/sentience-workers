@@ -21,7 +21,7 @@ I use `rustfs` as a self-hosted S3 implementation, however you can of course opt
 > [!WARNING]
 > Note that the S3 region parameter is hardcoded to `yo-mama` in the code, as rustfs does not check the s3 region parameter, only its existence.
 
-Make sure your `DATABASE_URL` is the full connection string including all credentials (Ends with `/postgres` on supabase).
+Make sure your `DATABASE_URL` is the full connection string including all credentials (Ends with `/postgres` on supabase), this the format it should follow: `postgres://user:password@host:port/db-name`.
 Also ensure that your instance of Postgres has the pgvector extension installed.
 If you don't want to set up Postgres yourself, supabase is a great option which I've been using during development.
 
