@@ -1,7 +1,6 @@
 //! Integration tests of the historical scan against a real Postgres and a fake Discord.
-mod common;
 
-use common::*;
+use crate::common::*;
 use ingest_vestibule_retriever::historical::run_historical_scan;
 use serde_json::json;
 use serenity::all::GuildId;

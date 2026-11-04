@@ -1,8 +1,7 @@
 //! Integration tests of the handler orchestration against a real Postgres, with fake Discord,
 //! fake media downloads and an in-memory object store.
-mod common;
 
-use common::*;
+use crate::common::*;
 use ingest_vestibule_retriever::handlers;
 use serde_json::json;
 use serenity::all::Reaction;

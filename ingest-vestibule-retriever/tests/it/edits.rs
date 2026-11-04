@@ -1,7 +1,6 @@
 //! Message edit history (bug #6).
-mod common;
 
-use common::*;
+use crate::common::*;
 use ingest_vestibule_retriever::handlers;
 use serde_json::json;
 

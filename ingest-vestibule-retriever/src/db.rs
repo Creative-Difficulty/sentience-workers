@@ -4,10 +4,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ormlite::Model as _;
 use sqlx::PgPool;
-use unidb::models::{
-    DiscordAccount, DiscordChannel, DiscordEmoji, MediaAsset, MessageAttachment, MessageReaction,
-    VestibuleUser,
-};
+use unidb::models::{DiscordChannel, DiscordEmoji, MediaAsset, MessageAttachment, MessageReaction};
 use uuid::Uuid;
 
 use crate::mapping::{EmojiSpec, MessageRow, UserRow};
@@ -160,32 +157,96 @@ pub async fn mark_message_deleted(pool: &PgPool, message_id: i64) -> color_eyre:
 // users
 // ---------------------------------------------------------------------------------------------
 
-/// Inserts the `vestibule_users` + `discord_accounts` rows for a new Discord user.
-pub async fn insert_user(pool: &PgPool, row: &UserRow) -> color_eyre::Result<()> {
-    let vestibule_user_id = Uuid::new_v4();
-    VestibuleUser {
-        id: vestibule_user_id,
-        nickname: Some(row.nickname.clone()),
-        intro_message_id: None,
-        score_id: None,
-        score_last_updated: None,
-        current_diagram: None,
-        current_diagram_last_updated: None,
-        intro_diagram: None,
+/// Result of [`ensure_user_rows`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureUser {
+    /// New `vestibule_users` + `discord_accounts` rows were inserted.
+    Created,
+    /// The account already existed; nothing written.
+    Existing,
+}
+
+/// Suffix appended to the username of a stale account whose username was taken over by another
+/// Discord user. `#` cannot occur in Discord usernames, so the result never collides with a real
+/// username.
+pub fn stale_username(username: &str, discord_user_id: i64) -> String {
+    format!("{username}#stale-{discord_user_id}")
+}
+
+/// Inserts the `vestibule_users` + `discord_accounts` rows for a Discord user, atomically and
+/// idempotently.
+///
+/// * A transaction-scoped advisory lock on the Discord user id serializes concurrent calls for
+///   the same user (live events + historical scan race on new users), so no orphan
+///   `vestibule_users` rows are created.
+/// * `discord_accounts.username` is `UNIQUE`, but Discord usernames are only unique at a point in
+///   time and can be changed and re-used. If another (necessarily stale) account still holds the
+///   username, that row's username is renamed to [`stale_username`] so the current holder can be
+///   inserted. Without this, every message of the new user would fail its FK forever.
+pub async fn ensure_user_rows(pool: &PgPool, row: &UserRow) -> color_eyre::Result<EnsureUser> {
+    let mut tx = pool.begin().await?;
+    sqlx::query!("SELECT pg_advisory_xact_lock($1)", row.discord_user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let exists = sqlx::query_scalar!(
+        "SELECT 1 FROM discord_accounts WHERE discord_user_id = $1",
+        row.discord_user_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if exists {
+        tx.commit().await?;
+        return Ok(EnsureUser::Existing);
     }
-    .insert(pool)
+
+    let displaced = sqlx::query!(
+        "UPDATE discord_accounts SET username = username || '#stale-' || discord_user_id::text
+         WHERE username = $1 AND discord_user_id <> $2",
+        row.username,
+        row.discord_user_id
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if displaced > 0 {
+        tracing::warn!(
+            username = %row.username,
+            "username was held by a stale discord account; renamed the stale account"
+        );
+    }
+
+    let vestibule_user_id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO vestibule_users (id, nickname) VALUES ($1, $2)",
+        vestibule_user_id,
+        row.nickname
+    )
+    .execute(&mut *tx)
     .await?;
 
-    let account = DiscordAccount {
-        discord_user_id: row.discord_user_id,
+    let inserted = sqlx::query!(
+        "INSERT INTO discord_accounts (discord_user_id, vestibule_user_id, username, display_name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (discord_user_id) DO NOTHING",
+        row.discord_user_id,
         vestibule_user_id,
-        username: row.username.clone(),
-        display_name: row.display_name.clone(),
-    };
-    if let Err(e) = account.insert(pool).await {
-        tracing::error!(error = %e, "Could not upsert discord account");
+        row.username,
+        row.display_name
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    if inserted == 0 {
+        // Lost a race with a writer that does not take the advisory lock: drop our
+        // vestibule_users row with the rest of the transaction.
+        tx.rollback().await?;
+        return Ok(EnsureUser::Existing);
     }
-    Ok(())
+    tx.commit().await?;
+    Ok(EnsureUser::Created)
 }
 
 // ---------------------------------------------------------------------------------------------

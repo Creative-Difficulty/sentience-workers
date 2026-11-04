@@ -1,7 +1,6 @@
 //! Unit tests for the pure Discord -> row mapping functions (no DB needed).
-mod common;
 
-use common::*;
+use crate::common::*;
 use ingest_vestibule_retriever::mapping::*;
 use serde_json::json;
 use serenity::all::{ReactionType, StickerItem};
