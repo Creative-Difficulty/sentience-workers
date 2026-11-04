@@ -1,146 +1,119 @@
-use crate::AppCtx;
-use ormlite::Model as _;
+use crate::mapping::{AssetSpec, attachment_spec, snowflake, sticker_spec};
+use crate::{AppCtx, db};
 use serenity::all::Message;
 use sha2::{Digest, Sha256};
-use unidb::models::{MediaAsset, MessageAttachment};
 use uuid::Uuid;
 
-/// Uploads from URL to S3 bucket and check if the data already exists in the media_assets table via hash. In that case it returns the media asset id of the identical asset instead of uploading twice.
-/// Returns ID of media asset it inserted.
-/// Because S3 upload happens first, worse case is that we have stray files in the S3 bucket
+/// Downloads `spec.url`, and stores it in the object store + `media_assets`.
+/// If identical content (by SHA-256) is already stored, the existing asset id is returned instead
+/// of uploading twice. Because the upload happens first, the worst case is a stray object.
 pub async fn download_and_store_media_asset(
     ctx: &AppCtx,
-    object_key: String,
-    url: &str,
-    content_type: String,
+    spec: &AssetSpec,
 ) -> color_eyre::Result<Uuid> {
-    let bytes = match reqwest::get(url).await {
-        Ok(resp) => match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                // TODO do we log and return or just return?
-                tracing::error!(error = %e, url = %url, "Failed to download media");
-                return Err(e.into());
-            }
-        },
+    let bytes = match ctx.fetcher.fetch(&spec.url).await {
+        Ok(b) => b,
         Err(e) => {
-            tracing::error!(error = %e, url = %url, "Failed to fetch media URL");
-            return Err(e.into());
+            tracing::error!(error = %e, url = %spec.url, "Failed to download media");
+            return Err(e);
         }
     };
 
     let content_hash = hex::encode(Sha256::digest(&bytes));
-    if let Some(already_uploaded_uuid) = sqlx::query_scalar!(
-        "SELECT id FROM media_assets WHERE content_hash = $1",
-        content_hash
-    )
-    .fetch_optional(&ctx.db_pool)
-    .await?
-    {
-        return Ok(already_uploaded_uuid);
-    };
+    if let Some(existing) = db::find_asset_by_hash(&ctx.db_pool, &content_hash).await? {
+        return Ok(existing);
+    }
 
     let size_bytes = bytes.len() as i64;
-    let stream = aws_sdk_s3::primitives::ByteStream::from(bytes);
-
     if let Err(e) = ctx
-        .s3_client
-        .put_object()
-        .bucket(&ctx.s3_bucket)
-        .key(&object_key)
-        .body(stream)
-        .content_type(&content_type)
-        .send()
+        .store
+        .put(&spec.object_key, bytes, &spec.content_type)
         .await
     {
-        tracing::error!(error = %e, object_key = %object_key, "Failed to upload media to S3 bucket");
-        return Err(e.into());
+        tracing::error!(error = %e, object_key = %spec.object_key, "Failed to upload media to S3 bucket");
+        return Err(e);
     }
 
-    let asset_id = Uuid::new_v4();
-
-    if let Err(e) = (MediaAsset {
-        id: asset_id,
-        content_type,
-        object_key,
-        size_bytes: Some(size_bytes),
-        content_hash: Some(content_hash),
-        embedding: None,
-    })
-    .insert(&ctx.db_pool)
+    match db::insert_media_asset(
+        &ctx.db_pool,
+        &spec.content_type,
+        &spec.object_key,
+        size_bytes,
+        &content_hash,
+    )
     .await
     {
-        tracing::error!(error=%e, "Failed to insert media asset");
-        return Err(e.into());
+        Ok(id) => Ok(id),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to insert media asset");
+            Err(e)
+        }
+    }
+}
+
+/// Avatar variant: uploads and inserts the asset row, logging (not returning) errors.
+pub async fn store_media_asset_unchecked_avatar(ctx: &AppCtx, spec: &AssetSpec) {
+    let Ok(bytes) = ctx.fetcher.fetch(&spec.url).await else {
+        return;
+    };
+    let content_hash = hex::encode(Sha256::digest(&bytes));
+    let size_bytes = bytes.len() as i64;
+
+    if let Err(e) = ctx
+        .store
+        .put(&spec.object_key, bytes, &spec.content_type)
+        .await
+    {
+        tracing::error!(error = %e, object_key = %spec.object_key, "Failed to write avatar to S3 bucket");
     }
 
-    Ok(asset_id)
+    if let Err(e) = db::insert_media_asset(
+        &ctx.db_pool,
+        &spec.content_type,
+        &spec.object_key,
+        size_bytes,
+        &content_hash,
+    )
+    .await
+    {
+        tracing::error!(error = %e, "Failed to insert avatar media asset");
+    }
 }
 
 #[tracing::instrument(skip_all, fields(message_id=msg.id.get(), attachment_id = tracing::field::Empty))]
 pub async fn insert_message_attachments(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
+    let message_id = snowflake(msg.id.get());
     for attachment in &msg.attachments {
         tracing::Span::current().record("attachment_id", attachment.id.get());
+        let spec = attachment_spec(msg, attachment);
 
-        let discord_attachment_id = attachment.id.get() as i64;
-        match sqlx::query_scalar!(
-            "SELECT ma.id FROM message_attachments ma WHERE ma.message_id = $1 AND ma.asset_id IN (SELECT id FROM media_assets WHERE object_key = $2)",
-            msg.id.get() as i64,
-            format!("discord/attachments/{}/{}", msg.id.get(), discord_attachment_id)
-        )
-        .fetch_optional(&ctx.db_pool).await {
-            Ok(Some(_)) => {
+        match db::attachment_exists_by_key(&ctx.db_pool, message_id, &spec.object_key).await {
+            Ok(true) => {
                 tracing::debug!("Attachment is already stored in db attachments table, skipping");
                 continue;
             }
-            Ok(None) => (),
+            Ok(false) => (),
             Err(e) => {
                 tracing::error!(error=%e);
                 continue;
             }
+        }
+
+        let asset_id = match download_and_store_media_asset(ctx, &spec).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    "Error while downloading media and uploading it to S3: {}",
+                    e
+                );
+                continue;
+            }
         };
 
-        // TODO warn on fallback
-        let _ext = attachment.filename.rsplit('.').next().unwrap_or("bin");
-
-        let content_type = attachment
-            .content_type
-            .clone()
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-
-        let object_key = format!(
-            "discord/attachments/{}/{}",
-            msg.id.get(),
-            discord_attachment_id,
-        );
-
-        let asset_id =
-            match download_and_store_media_asset(ctx, object_key, &attachment.url, content_type)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(
-                        "Error while downloading media and uploading it to S3: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-        if let Err(e) = (MessageAttachment {
-            id: Uuid::new_v4(),
-            message_id: msg.id.get() as i64,
-            asset_id,
-            added_at: chrono::Utc::now(),
-            deleted_at: None,
-        })
-        .insert(&ctx.db_pool)
-        .await
-        {
+        if let Err(e) = db::insert_message_attachment(&ctx.db_pool, message_id, asset_id).await {
             tracing::error!(error=%e);
             continue;
-        };
+        }
 
         tracing::debug!(
             asset_id = %asset_id,
@@ -153,88 +126,36 @@ pub async fn insert_message_attachments(ctx: &AppCtx, msg: &Message) -> color_ey
 
 #[tracing::instrument(skip_all, fields(message_id=msg.id.get(), sticker_id = tracing::field::Empty))]
 pub async fn insert_stickers(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
+    let message_id = snowflake(msg.id.get());
     for sticker in &msg.sticker_items {
-        let sticker_id = sticker.id.get() as i64;
-        tracing::Span::current().record("sticker_id", sticker_id);
+        tracing::Span::current().record("sticker_id", sticker.id.get());
 
-        let existing = sqlx::query_scalar!(
-            "SELECT ma.id FROM message_attachments ma WHERE ma.message_id = $1 AND ma.asset_id IN (SELECT id FROM media_assets WHERE object_key LIKE $2)",
-            msg.id.get() as i64,
-            format!("discord/stickers/{}.%", sticker_id)
-        )
-        .fetch_optional(&ctx.db_pool)
-        .await?;
-
-        if existing.is_some() {
-            continue;
-        }
-
-        let ext = match sticker.format_type {
-            serenity::all::StickerFormatType::Png | serenity::all::StickerFormatType::Apng => "png",
-            serenity::all::StickerFormatType::Lottie => "json",
-            serenity::all::StickerFormatType::Gif => "gif",
-            _ => "bin",
-        };
-
-        if ext == "bin" {
+        let Some(spec) = sticker_spec(sticker) else {
             tracing::error!(
                 sticker_format_type = ?sticker.format_type,
-                "Failed to determine file type of sticker, falling back to .bin extension"
+                "Failed to determine file type of sticker, skipping"
             );
+            continue;
+        };
+
+        if db::attachment_exists_by_key(&ctx.db_pool, message_id, &spec.object_key).await? {
             continue;
         }
 
-        // TODO Where is this documented?
-        let sticker_url = format!(
-            "https://cdn.discordapp.com/stickers/{}.{}",
-            sticker.id.get(),
-            ext
-        );
+        let asset_id = match db::find_asset_by_key(&ctx.db_pool, &spec.object_key).await? {
+            Some(id) => id,
+            None => match download_and_store_media_asset(ctx, &spec).await {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::error!(error=%e);
+                    continue;
+                }
+            },
+        };
 
-        let object_key = format!("discord/stickers/{}.{}", sticker.id.get(), ext);
-        let mut asset_id = sqlx::query_scalar!(
-            "SELECT id FROM media_assets WHERE object_key = $1",
-            object_key
-        )
-        .fetch_optional(&ctx.db_pool)
-        .await?;
-
-        if asset_id.is_none() {
-            // TODO Refine to not use raw JSON (these are likely Lottie format stickers)
-            let content_type = if ext == "json" {
-                "application/json".to_string()
-            } else {
-                format!("image/{}", ext)
-            };
-
-            asset_id = Some(
-                match download_and_store_media_asset(ctx, object_key, &sticker_url, content_type)
-                    .await
-                {
-                    Ok(u) => u,
-                    Err(e) => {
-                        tracing::error!(error=%e);
-                        continue;
-                    }
-                },
-            );
-        }
-
-        #[allow(clippy::collapsible_if)]
-        if let Some(id) = asset_id {
-            if let Err(e) = (MessageAttachment {
-                id: Uuid::new_v4(),
-                message_id: msg.id.get() as i64,
-                asset_id: id,
-                added_at: chrono::Utc::now(),
-                deleted_at: None,
-            })
-            .insert(&ctx.db_pool)
-            .await
-            {
-                tracing::error!(error=%e, "Failed to insert sticker attachment row");
-                continue;
-            };
+        if let Err(e) = db::insert_message_attachment(&ctx.db_pool, message_id, asset_id).await {
+            tracing::error!(error=%e, "Failed to insert sticker attachment row");
+            continue;
         }
     }
     Ok(())

@@ -1,97 +1,33 @@
-use crate::AppCtx;
-use ormlite::Model as _;
-use serenity::all::{GuildId, ReactionType as SerenityReactionType, ReactionType};
-use unidb::models::DiscordEmoji;
+use crate::mapping::emoji_spec;
+use crate::{AppCtx, db};
+use serenity::all::{GuildId, ReactionType};
 use uuid::Uuid;
 
+/// Returns the `discord_emojis.id` for a reaction type, inserting (and downloading) it if needed.
 pub async fn handle_emoji_resolution(
     ctx: &AppCtx,
-    reaction_type: &SerenityReactionType,
+    reaction_type: &ReactionType,
     guild_id: Option<GuildId>,
 ) -> color_eyre::Result<Option<Uuid>> {
-    match reaction_type {
-        ReactionType::Custom {
-            animated, id, name, ..
-        } => {
-            let discord_emoji_id = id.get().to_string();
+    let Some(spec) = emoji_spec(reaction_type, guild_id) else {
+        return Ok(None);
+    };
 
-            let existing_emoji = sqlx::query_as!(
-                DiscordEmoji,
-                "SELECT * FROM discord_emojis WHERE discord_emoji_id = $1",
-                discord_emoji_id
-            )
-            .fetch_optional(&ctx.db_pool)
-            .await?;
+    if let Some(id) = db::find_emoji(&ctx.db_pool, &spec.discord_emoji_id).await? {
+        return Ok(Some(id));
+    }
 
-            if let Some(e) = existing_emoji {
-                return Ok(Some(e.id));
-            }
+    let asset_id = match &spec.asset {
+        // Download emoji and store as a media asset via S3 object key
+        Some(asset) => Some(super::attachments::download_and_store_media_asset(ctx, asset).await?),
+        None => None,
+    };
 
-            // All emojis are served in webp, this makes life way easier
-            let emoji_url = if *animated {
-                format!("https://cdn.discordapp.com/emojis/{}.webp?animated=true", id.get())
-            } else {
-                format!("https://cdn.discordapp.com/emojis/{}.webp", id.get())
-            };
-
-            // Download emoji and store as a media asset via S3 object key
-            let object_key = format!("discord/emojis/{}.webp", id.get());
-
-            let asset_id = super::attachments::download_and_store_media_asset(
-                ctx,
-                object_key,
-                &emoji_url,
-                "image/webp".to_string(),
-            )
-            .await?;
-
-            let new_emoji_id = Uuid::new_v4();
-            let new_emoji = DiscordEmoji {
-                id: new_emoji_id,
-                discord_emoji_id: discord_emoji_id.clone(),
-                from_guild: guild_id.map(|g| g.get().to_string()),
-                emoji_display_name: name.clone(),
-                is_animated: *animated,
-                emoji_url: Some(emoji_url),
-                asset_id: Some(asset_id),
-            };
-
-            if let Err(e) = new_emoji.insert(&ctx.db_pool).await {
-                tracing::error!(error = %e, "Failed to insert discord emoji");
-                return Err(e.into());
-            }
-            Ok(Some(new_emoji_id))
+    match db::insert_emoji(&ctx.db_pool, &spec, asset_id).await {
+        Ok(id) => Ok(Some(id)),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to insert discord emoji");
+            Err(e)
         }
-        ReactionType::Unicode(s) => {
-            let discord_emoji_id = s.clone();
-            let existing_emoji = sqlx::query_as!(
-                DiscordEmoji,
-                "SELECT * FROM discord_emojis WHERE discord_emoji_id = $1",
-                discord_emoji_id
-            )
-            .fetch_optional(&ctx.db_pool)
-            .await?;
-
-            if let Some(e) = existing_emoji {
-                return Ok(Some(e.id));
-            }
-
-            let new_emoji_id = Uuid::new_v4();
-            let new_emoji = DiscordEmoji {
-                id: new_emoji_id,
-                discord_emoji_id: discord_emoji_id.clone(),
-                from_guild: None,
-                emoji_display_name: None,
-                is_animated: false,
-                emoji_url: None,
-                asset_id: None,
-            };
-            if let Err(e) = new_emoji.insert(&ctx.db_pool).await {
-                tracing::error!(error = %e, "Failed to insert discord emoji");
-                return Err(e.into());
-            }
-            Ok(Some(new_emoji_id))
-        }
-        _ => Ok(None),
     }
 }

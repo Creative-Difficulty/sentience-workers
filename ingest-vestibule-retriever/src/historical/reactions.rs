@@ -1,8 +1,7 @@
-use crate::AppCtx;
-use serenity::all::Message;
-use uuid::Uuid;
-
 use crate::handlers::emoji::handle_emoji_resolution;
+use crate::mapping::snowflake;
+use crate::{AppCtx, db};
+use serenity::all::Message;
 
 pub async fn insert_all_reactions_for_message(
     ctx: &AppCtx,
@@ -16,13 +15,9 @@ pub async fn insert_all_reactions_for_message(
 
         // Get all message reactions if there are over 100, Discord API limits at 100 per request
         loop {
-            match msg
-                .reaction_users(
-                    &ctx.discord_ctx.http,
-                    reaction.reaction_type.clone(),
-                    Some(100),
-                    after,
-                )
+            match ctx
+                .discord
+                .reaction_users(msg.channel_id, msg.id, &reaction.reaction_type, after)
                 .await
             {
                 Ok(batch) => {
@@ -42,35 +37,21 @@ pub async fn insert_all_reactions_for_message(
         let emoji_id = handle_emoji_resolution(ctx, &reaction.reaction_type, msg.guild_id).await?;
 
         for user in users {
-            match crate::handlers::ensure_user(ctx, &user).await {
-                Ok(_) => (),
-                Err(e) => {
-                    tracing::error!(error = %e, "Could not ensure user is already in the db when inserting reaction");
-                    continue;
-                }
+            if let Err(e) = crate::handlers::ensure_user(ctx, &user).await {
+                tracing::error!(error = %e, "Could not ensure user is already in the db when inserting reaction");
+                continue;
             }
-
-            let msg_id = msg.id.get() as i64;
-            let user_id = user.id.get() as i64;
-            let now = chrono::Utc::now();
-            let new_id = Uuid::new_v4();
 
             // ON CONFLICT DO NOTHING avoids duplicate key errors if the reaction was
             // already inserted by the live event handler or a previous scan run.
-            let result = sqlx::query!(
-                "INSERT INTO message_reactions (id, message_id, user_id, emoji_id, reacted_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (message_id, user_id, emoji_id) DO NOTHING",
-                new_id,
-                msg_id,
-                user_id,
+            if let Err(e) = db::insert_reaction_ignore_duplicate(
+                &ctx.db_pool,
+                snowflake(msg.id.get()),
+                snowflake(user.id.get()),
                 emoji_id,
-                now
             )
-            .execute(&ctx.db_pool)
-            .await;
-
-            if let Err(e) = result {
+            .await
+            {
                 tracing::error!(error = %e, "Failed to insert reaction");
             }
         }

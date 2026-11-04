@@ -1,117 +1,24 @@
-use crate::AppCtx;
-use ormlite::Model;
-use sha2::{Digest, Sha256};
-use unidb::models::{DiscordAccount, MediaAsset, VestibuleUser};
-use uuid::Uuid;
+use crate::handlers::attachments::store_media_asset_unchecked_avatar;
+use crate::mapping::{avatar_spec, user_row};
+use crate::{AppCtx, cache_contains, cache_insert, db};
 
+/// Makes sure the Discord user is in `vestibule_users` + `discord_accounts` and stores its avatar.
 pub async fn ensure_user(ctx: &AppCtx, user: &serenity::all::User) -> color_eyre::Result<()> {
-    if ctx
-        .user_id_cache
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(&(user.id.get() as i64))
-    {
+    let row = user_row(user);
+    if cache_contains(&ctx.user_id_cache, row.discord_user_id) {
         return Ok(());
     }
 
-    // TODO fix mixed UUID types: Postgres generates v7 (i think) but I like v4 the best
-    let vestibule_user_id = Uuid::new_v4();
+    db::insert_user(&ctx.db_pool, &row).await?;
+    cache_insert(&ctx.user_id_cache, row.discord_user_id);
 
-    let vestibule_user = VestibuleUser {
-        id: vestibule_user_id,
-        nickname: Some(
-            user.global_name
-                .clone()
-                .unwrap_or_else(|| user.name.clone()),
-        ),
-        intro_message_id: None,
-        score_id: None,
-        score_last_updated: None,
-        current_diagram: None,
-        current_diagram_last_updated: None,
-        intro_diagram: None,
-    };
-
-    vestibule_user.insert(&ctx.db_pool).await?;
-
-    let discord_account = DiscordAccount {
-        discord_user_id: user.id.get() as i64,
-        vestibule_user_id,
-        username: user.name.clone(),
-        display_name: user.global_name.clone().unwrap_or(user.name.clone()),
-    };
-
-    if let Err(e) = discord_account.insert(&ctx.db_pool).await {
-        tracing::error!(error = %e, "Could not upsert discord account");
-    }
-
-    ctx.user_id_cache
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(user.id.get() as i64);
-
-    if let Some(avatar_url) = user.avatar_url() {
-        let avatar_hash = user
-            .avatar
-            .as_ref()
-            .map(|h| h.to_string())
-            .unwrap_or_else(|| "default".to_string());
-
-        let ext = if avatar_url.contains(".gif") {
-            "gif"
-        } else {
-            "webp"
-        };
-
-        let object_key = format!("discord/avatars/{}/{}", user.id.get(), avatar_hash);
-
+    if let Some(spec) = avatar_spec(user) {
         // Check if we already have this avatar
-        let existing_avatar = sqlx::query_scalar!(
-            "SELECT id FROM media_assets WHERE object_key = $1",
-            object_key
-        )
-        .fetch_optional(&ctx.db_pool)
-        .await?;
-
-        #[allow(clippy::collapsible_if)]
-        if existing_avatar.is_none() {
-            if let Ok(resp) = reqwest::get(&avatar_url).await {
-                if let Ok(bytes) = resp.bytes().await {
-                    let content_hash = hex::encode(Sha256::digest(&bytes));
-                    let asset_id = Uuid::new_v4();
-
-                    let content_type = format!("image/{}", ext);
-
-                    let stream = aws_sdk_s3::primitives::ByteStream::from(bytes.to_vec());
-
-                    if let Err(e) = ctx
-                        .s3_client
-                        .put_object()
-                        .bucket(&ctx.s3_bucket)
-                        .key(&object_key)
-                        .body(stream)
-                        .content_type(&content_type)
-                        .send()
-                        .await
-                    {
-                        tracing::error!(error = %e, object_key = %object_key, "Failed to write avatar to S3 bucket");
-                    }
-
-                    if let Err(e) = (MediaAsset {
-                        id: asset_id,
-                        content_type: content_type.clone(),
-                        object_key: object_key.clone(),
-                        size_bytes: Some(bytes.len() as i64),
-                        content_hash: Some(content_hash),
-                        embedding: None,
-                    })
-                    .insert(&ctx.db_pool)
-                    .await
-                    {
-                        tracing::error!(error = %e, "Failed to insert avatar media asset");
-                    }
-                }
-            }
+        if db::find_asset_by_key(&ctx.db_pool, &spec.object_key)
+            .await?
+            .is_none()
+        {
+            store_media_asset_unchecked_avatar(ctx, &spec).await;
         }
     }
 

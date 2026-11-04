@@ -1,23 +1,16 @@
-use crate::AppCtx;
-use ormlite::Model as _;
-use unidb::models::{DiscordChannel, enums::DiscordChannelType};
+use crate::mapping::channel_row;
+use crate::{AppCtx, cache_contains, cache_insert, db};
+use serenity::all::{Channel, ChannelId};
 
+/// Makes sure `channel_id` and all of its parents are in `discord_channels`.
 #[tracing::instrument(skip_all, fields(channel_id=channel_id.get()))]
-pub async fn ensure_discord_channel(
-    ctx: &AppCtx,
-    channel_id: serenity::all::ChannelId,
-) -> color_eyre::Result<()> {
-    if ctx
-        .channel_id_cache
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(&(channel_id.get() as i64))
-    {
+pub async fn ensure_discord_channel(ctx: &AppCtx, channel_id: ChannelId) -> color_eyre::Result<()> {
+    if cache_contains(&ctx.channel_id_cache, channel_id.get() as i64) {
         return Ok(());
     }
 
     // Need to fetch it and its parents
-    let channel = match ctx.discord_ctx.http.get_channel(channel_id).await {
+    let channel = match ctx.discord.get_channel(channel_id).await {
         Ok(c) => match c.guild() {
             Some(gc) => gc,
             None => return Err(color_eyre::eyre::eyre!("Not a guild channel")),
@@ -30,17 +23,12 @@ pub async fn ensure_discord_channel(
 
     // Recursively collect all parent channels up to the root, stopping early if already cached
     while let Some(parent_id) = current_parent_id {
-        if ctx
-            .channel_id_cache
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&(parent_id.get() as i64))
-        {
+        if cache_contains(&ctx.channel_id_cache, parent_id.get() as i64) {
             break;
         }
 
-        match ctx.discord_ctx.http.get_channel(parent_id).await {
-            Ok(serenity::all::Channel::Guild(parent_channel)) => {
+        match ctx.discord.get_channel(parent_id).await {
+            Ok(Channel::Guild(parent_channel)) => {
                 current_parent_id = parent_channel.parent_id;
                 channels_to_insert.push(parent_channel);
             }
@@ -60,31 +48,11 @@ pub async fn ensure_discord_channel(
 
     // Insert from top (root parent) to bottom (the actual channel we want to insert)
     for ch in channels_to_insert.into_iter().rev() {
-        let ch_id = ch.id.get() as i64;
-        let channel_type = DiscordChannelType::try_from(ch.kind).unwrap_or_else(|_| {
-            tracing::error!(
-                channel_id = ch_id,
-                "Discord channel kind (\"{}\") is not a known channel type, returning text type as fallback.",
-                ch.kind.name()
-            );
-            DiscordChannelType::Text
-        });
-
-        let db_channel = DiscordChannel {
-            channel_id: ch_id,
-            name: ch.name.clone(),
-            channel_type,
-            parent_channel_id: ch.parent_id.map(|id| id.get() as i64),
-        };
-
-        if let Err(e) = db_channel.insert(&ctx.db_pool).await {
-            tracing::error!("Failed to insert channel {}: {}", ch_id, e);
+        let row = channel_row(&ch);
+        if let Err(e) = db::insert_channel(&ctx.db_pool, &row).await {
+            tracing::error!("Failed to insert channel {}: {}", row.channel_id, e);
         }
-
-        ctx.channel_id_cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(ch_id);
+        cache_insert(&ctx.channel_id_cache, row.channel_id);
     }
 
     Ok(())

@@ -1,21 +1,21 @@
-use std::collections::HashSet;
 use std::env;
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use aws_sdk_s3::config::Credentials;
+use ingest_vestibule_retriever::media::{HttpFetcher, S3Store};
+use ingest_vestibule_retriever::startup::{self, ReadyFile};
 use serenity::all::GatewayIntents;
 use tracing_subscriber::layer::SubscriberExt as _;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    setup_tracing()?;
-
-    // TODO check behavior
-    dotenvy::dotenv().ok();
+    let directive = startup::load_env_and_filter_directive(None);
+    setup_tracing(&directive)?;
 
     let env_vars = get_env_vars()?;
-    tracing::debug!("loaded environment variables from .env");
+    tracing::debug!("loaded environment variables");
 
     let db_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
@@ -23,35 +23,8 @@ async fn main() -> color_eyre::Result<()> {
         .await?;
     tracing::debug!("created database connection pool");
 
-    let existing_ids = sqlx::query_scalar!("SELECT message_id FROM messages")
-        .fetch_all(&db_pool)
-        .await?;
-    let id_count = existing_ids.len();
-    let message_id_cache: ingest_vestibule_retriever::IdCache = Arc::new(RwLock::new(
-        existing_ids.into_iter().collect::<HashSet<i64>>(),
-    ));
-    tracing::debug!(count = id_count, "loaded message ID cache from database");
-
-    let existing_channel_ids = sqlx::query_scalar!("SELECT channel_id FROM discord_channels")
-        .fetch_all(&db_pool)
-        .await?;
-    let channel_count = existing_channel_ids.len();
-    let channel_id_cache: ingest_vestibule_retriever::IdCache = Arc::new(RwLock::new(
-        existing_channel_ids.into_iter().collect::<HashSet<i64>>(),
-    ));
-    tracing::debug!(
-        count = channel_count,
-        "loaded channel ID cache from database"
-    );
-
-    let existing_user_ids = sqlx::query_scalar!("SELECT discord_user_id FROM discord_accounts")
-        .fetch_all(&db_pool)
-        .await?;
-    let user_count = existing_user_ids.len();
-    let user_id_cache: ingest_vestibule_retriever::IdCache = Arc::new(RwLock::new(
-        existing_user_ids.into_iter().collect::<HashSet<i64>>(),
-    ));
-    tracing::debug!(count = user_count, "loaded user ID cache from database");
+    let (message_id_cache, channel_id_cache, user_id_cache) =
+        ingest_vestibule_retriever::load_caches(&db_pool).await?;
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
@@ -63,8 +36,11 @@ async fn main() -> color_eyre::Result<()> {
 
     let handler = ingest_vestibule_retriever::discord_handler::DiscordEventHandler {
         db_pool,
-        s3_client,
-        s3_bucket: env_vars.s3_bucket_name,
+        fetcher: Arc::new(HttpFetcher::new(reqwest::Client::new())),
+        store: Arc::new(S3Store {
+            client: s3_client,
+            bucket: env_vars.s3_bucket_name.clone(),
+        }),
         guild_id: serenity::all::GuildId::new(env_vars.discord_guild_id),
         message_id_cache,
         channel_id_cache,
@@ -75,7 +51,7 @@ async fn main() -> color_eyre::Result<()> {
         .event_handler(handler)
         .await?;
 
-    tokio::fs::write("/tmp/ready", "1").await?;
+    ReadyFile(PathBuf::from("/tmp/ready")).mark()?;
     tracing::debug!("wrote readiness file to /tmp/ready");
 
     if let Err(e) = client.start().await {
@@ -85,11 +61,8 @@ async fn main() -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn setup_tracing() -> color_eyre::Result<()> {
-    let default_filter = format!("{}=trace,serenity=off", env!("CARGO_CRATE_NAME"));
-    let env_filter = tracing_subscriber::EnvFilter::try_new(
-        std::env::var("RUST_LOG").unwrap_or(default_filter),
-    )?;
+fn setup_tracing(directive: &str) -> color_eyre::Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_new(directive)?;
 
     let subscriber = tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -110,25 +83,14 @@ struct EnvVars {
 }
 
 fn get_env_vars() -> color_eyre::Result<EnvVars> {
-    let discord_token = env::var("DISCORD_TOKEN")?;
-    let db_url = env::var("DATABASE_URL")?;
-    let discord_guild_id = env::var("GUILD_ID")?.parse::<u64>()?;
-    let s3_url = env::var("S3_URL")?.parse::<String>()?;
-
-    let s3_access_key_id = env::var("S3_ACCESS_KEY_ID")?.parse::<String>()?;
-
-    let s3_secret_access_key = env::var("S3_SECRET_ACCESS_KEY")?.parse::<String>()?;
-
-    let s3_bucket_name = env::var("S3_BUCKET_NAME")?.parse::<String>()?;
-
     Ok(EnvVars {
-        discord_token,
-        db_url,
-        discord_guild_id,
-        s3_url,
-        s3_access_key_id,
-        s3_secret_access_key,
-        s3_bucket_name,
+        discord_token: env::var("DISCORD_TOKEN")?,
+        db_url: env::var("DATABASE_URL")?,
+        discord_guild_id: env::var("GUILD_ID")?.parse::<u64>()?,
+        s3_url: env::var("S3_URL")?,
+        s3_access_key_id: env::var("S3_ACCESS_KEY_ID")?,
+        s3_secret_access_key: env::var("S3_SECRET_ACCESS_KEY")?,
+        s3_bucket_name: env::var("S3_BUCKET_NAME")?,
     })
 }
 

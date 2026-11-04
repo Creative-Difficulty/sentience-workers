@@ -1,21 +1,21 @@
 use crate::AppCtx;
 use serenity::all::GuildId;
-use serenity::builder::GetMessages;
+use tracing::Instrument as _;
 
 #[tracing::instrument(skip_all)]
 pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::Result<()> {
     tracing::info!("Starting historical message scan across all channels in guild");
 
-    let channels = match guild_id.channels(&ctx.discord_ctx.http).await {
+    let channels = match ctx.discord.guild_channels(guild_id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "Failed to get guild channels");
-            return Err(e.into());
+            return Err(e);
         }
     };
 
-    for (channel_id, channel) in channels {
-        use tracing::Instrument;
+    for channel in channels {
+        let channel_id = channel.id;
         async {
             tracing::info!("Scanning channel: \"{}\", with id {}", channel.name, channel_id);
 
@@ -23,22 +23,13 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
             let mut all_messages = Vec::new();
 
             loop {
-                let mut builder = GetMessages::new().limit(100);
-                if let Some(id) = last_message_id {
-                    builder = builder.before(id);
-                }
-
-                match channel_id.messages(&ctx.discord_ctx.http, builder).await {
+                match ctx.discord.messages_before(channel_id, last_message_id).await {
                     Ok(messages) => {
                         if messages.is_empty() {
                             break;
                         }
-
                         last_message_id = messages.last().map(|m| m.id);
                         all_messages.extend(messages);
-
-                        // A slight delay to avoid hammering the Discord API too hard
-                        // tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(e) => {
                         // This is mostly due to missing access permissions
@@ -46,15 +37,6 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
                         break;
                     }
                 }
-            }
-
-
-            if !all_messages.is_empty() {
-                tracing::info!(
-                    "Found {} messages in channel \"{}\", processing...",
-                    all_messages.len(),
-                    channel.name
-                );
             }
 
             let total = all_messages.len();
@@ -71,11 +53,7 @@ pub async fn run_historical_scan(ctx: AppCtx, guild_id: GuildId) -> color_eyre::
                 }
             }
 
-            tracing::info!(
-                "Finished scanning channel: {} ({})",
-                channel.name,
-                channel_id
-            );
+            tracing::info!("Finished scanning channel: {} ({})", channel.name, channel_id);
         }
         .instrument(tracing::info_span!("scan_channel", channel_id = channel_id.get()))
         .await;
