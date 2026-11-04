@@ -4,13 +4,17 @@ use fact_extractor::{config::Config, llm, worker::Worker};
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+    // .env first, so a RUST_LOG set there is honoured by the subscriber
+    let dotenv_problem = llm_worker_common::load_dotenv();
     llm_worker_common::init_tracing(env!("CARGO_CRATE_NAME"))?;
+    if let Some(problem) = dotenv_problem {
+        tracing::warn!("{problem}");
+    }
 
-    // TODO check behavior
-    dotenvy::dotenv().ok();
-
+    // validated before anything else; never report readiness for a bad config
     let config = Config::from_env()?;
-    tracing::debug!("loaded environment variables from .env");
+    llm_worker_common::clear_ready_file(&config.ready_file).await;
+    tracing::debug!("loaded and validated configuration");
 
     let db_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
@@ -20,9 +24,8 @@ async fn main() -> color_eyre::Result<()> {
     tracing::debug!("created database connection pool");
 
     let llm_client = llm::build_client(&config);
-    tracing::debug!("built LLM client");
+    tracing::debug!(timeout = ?config.llm_timeout, "built LLM client");
 
-    tokio::fs::write("/tmp/ready", "1").await?;
-    tracing::debug!("wrote readiness file to /tmp/ready");
+    llm_worker_common::write_ready_file(&config.ready_file).await?;
     Worker::new(db_pool, llm_client, &config).run().await
 }
