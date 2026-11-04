@@ -1,5 +1,31 @@
+# Build context for the root Dockerfile (Rust workers).
+# Keep it to what cargo needs so unrelated edits don't bust the layer cache.
+
+# Build outputs / VCS / local state
 target/
-*/target/
+**/target/
 .git/
+.github/
+.idea/
+.vscode/
+**/.DS_Store
+
+# Secrets: never send env files into the build context
 .env
+**/.env
+.env.*
+**/.env.*
+!**/.env.example
+
+# Docs and non-Rust tooling (compose, scripts, postgres/mock images)
 *.md
+docker/
+docker-compose*.yml
+compose*.yml
+Makefile
+scripts/
+Dockerfile
+.dockerignore
+
+# Required: sqlx offline query cache (SQLX_OFFLINE=true builds)
+!.sqlx/
