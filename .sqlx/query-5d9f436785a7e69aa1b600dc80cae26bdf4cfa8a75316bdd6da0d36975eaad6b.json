@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ma.id FROM message_attachments ma WHERE ma.message_id = $1 AND ma.asset_id IN (SELECT id FROM media_assets WHERE object_key = $2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5d9f436785a7e69aa1b600dc80cae26bdf4cfa8a75316bdd6da0d36975eaad6b"
+}
