@@ -18,8 +18,12 @@ pub fn snowflake(id: u64) -> i64 {
 /// Returns a synthetic content string for system messages (joins, boosts, pins, ...).
 /// Returns `None` for regular messages/replies where the original content should be kept.
 pub fn system_message_content(msg: &Message) -> Option<String> {
-    let author = &msg.author.name;
-    let s = match msg.kind {
+    system_content_for(msg.kind, &msg.author.name)
+}
+
+/// [`system_message_content`] for a message kind and author name.
+pub fn system_content_for(kind: MessageType, author: &str) -> Option<String> {
+    let s = match kind {
         MessageType::Regular
         | MessageType::InlineReply
         | MessageType::ChatInputCommand
@@ -73,6 +77,21 @@ pub fn system_message_content(msg: &Message) -> Option<String> {
         _ => return None,
     };
     Some(s)
+}
+
+/// Whether messages of this kind store synthetic (not user-authored) content.
+pub fn is_system_kind(kind: MessageType) -> bool {
+    system_content_for(kind, "").is_some()
+}
+
+/// The new content to record for an edit, or `None` if the update does not change
+/// user-authored content (no content in the update, or a system message whose stored content is
+/// synthetic).
+pub fn edit_content(kind: Option<MessageType>, content: Option<&str>) -> Option<String> {
+    if kind.is_some_and(is_system_kind) {
+        return None;
+    }
+    content.map(str::to_owned)
 }
 
 /// Content to store for a message: synthetic text for system messages, raw content otherwise.

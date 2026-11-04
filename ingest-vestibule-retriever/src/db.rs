@@ -5,8 +5,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use ormlite::Model as _;
 use sqlx::PgPool;
 use unidb::models::{
-    DiscordAccount, DiscordChannel, DiscordEmoji, MediaAsset, MessageAttachment, MessageEdit,
-    MessageReaction, VestibuleUser,
+    DiscordAccount, DiscordChannel, DiscordEmoji, MediaAsset, MessageAttachment, MessageReaction,
+    VestibuleUser,
 };
 use uuid::Uuid;
 
@@ -84,32 +84,66 @@ pub async fn message_content(pool: &PgPool, message_id: i64) -> color_eyre::Resu
     .await?)
 }
 
-/// Appends an edit-history row and updates the message to its new content.
-pub async fn insert_edit_and_update(
+/// Result of [`record_edit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditOutcome {
+    /// The message is not in the DB.
+    NotFound,
+    /// The stored content already equals the new content (e.g. embed-only update, duplicate
+    /// event): nothing written.
+    Unchanged,
+    /// The stored row was edited at or after `edited_at`: the event is stale, nothing written.
+    Stale,
+    /// Old content appended to `message_edits`, message updated.
+    Recorded,
+}
+
+/// Records an edit atomically: locks the message row, appends the *currently stored* content to
+/// `message_edits` and updates the message, unless the content is unchanged or the event is
+/// older than the stored edit.
+pub async fn record_edit(
     pool: &PgPool,
     message_id: i64,
-    old_content: String,
     new_content: &str,
     edited_at: DateTime<Utc>,
-) -> color_eyre::Result<()> {
-    MessageEdit {
-        id: Uuid::new_v4(),
-        message_id,
-        old_content,
-        edited_at,
-    }
-    .insert(pool)
-    .await?;
+) -> color_eyre::Result<EditOutcome> {
+    let mut tx = pool.begin().await?;
+    let Some(current) = sqlx::query!(
+        "SELECT content, last_edited FROM messages WHERE message_id = $1 FOR UPDATE",
+        message_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(EditOutcome::NotFound);
+    };
 
+    if current.content == new_content {
+        return Ok(EditOutcome::Unchanged);
+    }
+    if current.last_edited.is_some_and(|last| edited_at <= last) {
+        return Ok(EditOutcome::Stale);
+    }
+
+    sqlx::query!(
+        "INSERT INTO message_edits (id, message_id, old_content, edited_at) VALUES ($1, $2, $3, $4)",
+        Uuid::new_v4(),
+        message_id,
+        current.content,
+        edited_at
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query!(
         "UPDATE messages SET content = $1, last_edited = $2 WHERE message_id = $3",
         new_content,
         edited_at,
         message_id
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(EditOutcome::Recorded)
 }
 
 pub async fn mark_message_deleted(pool: &PgPool, message_id: i64) -> color_eyre::Result<()> {

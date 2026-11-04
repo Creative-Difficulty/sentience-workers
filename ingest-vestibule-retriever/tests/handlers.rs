@@ -179,7 +179,11 @@ async fn sticker_only_message_stores_sticker() {
     handlers::ensure_message(&h.ctx, &message(v)).await.unwrap();
 
     assert!(
-        h.store.objects.lock().unwrap().contains_key("discord/stickers/4242.png"),
+        h.store
+            .objects
+            .lock()
+            .unwrap()
+            .contains_key("discord/stickers/4242.png"),
         "sticker not uploaded"
     );
     assert_eq!(

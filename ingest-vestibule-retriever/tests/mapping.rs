@@ -187,3 +187,17 @@ fn channel_row_maps_kind_and_parent() {
         "text"
     );
 }
+
+#[test]
+fn edit_content_ignores_system_messages_and_missing_content() {
+    use serenity::all::MessageType;
+    assert_eq!(
+        edit_content(Some(MessageType::Regular), Some("x")).as_deref(),
+        Some("x")
+    );
+    assert_eq!(edit_content(None, Some("x")).as_deref(), Some("x"));
+    assert_eq!(edit_content(Some(MessageType::MemberJoin), Some("")), None);
+    assert_eq!(edit_content(Some(MessageType::Regular), None), None);
+    assert!(is_system_kind(MessageType::PinsAdd));
+    assert!(!is_system_kind(MessageType::InlineReply));
+}

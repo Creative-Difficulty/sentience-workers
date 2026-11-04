@@ -66,29 +66,26 @@ impl EventHandler for DiscordEventHandler {
         });
     }
 
-    #[tracing::instrument(skip_all, fields(msg_id=_event.id.get(), channel_id=_event.channel_id.get()))]
+    #[tracing::instrument(skip_all, fields(msg_id=event.id.get(), channel_id=event.channel_id.get()))]
     async fn message_update(
         &self,
         ctx: Context,
         _old_if_available: Option<Message>,
-        new_msg: Option<Message>,
-        _event: serenity::all::MessageUpdateEvent,
+        _new: Option<Message>,
+        event: serenity::all::MessageUpdateEvent,
     ) {
-        let Some(msg) = new_msg else {
-            return;
-        };
-
-        if msg.guild_id != Some(self.guild_id) {
+        // `_new` is only `Some` for messages in serenity's cache, which by default holds none,
+        // so the event payload is used instead.
+        if event.guild_id != Some(self.guild_id) {
             return;
         }
 
         let app_ctx = self.ctx(ctx);
 
         tokio::spawn(async move {
-            if let Err(e) = crate::handlers::handle_message_edit(&app_ctx, &msg).await {
-                tracing::error!(error = %e, "Failed to process message edit handler");
-            } else {
-                tracing::debug!("Successfully logged message edit");
+            match crate::handlers::handle_message_update(&app_ctx, &event).await {
+                Ok(outcome) => tracing::debug!(?outcome, "Processed message update"),
+                Err(e) => tracing::error!(error = %e, "Failed to process message update"),
             }
         });
     }
