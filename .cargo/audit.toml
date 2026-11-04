@@ -1,0 +1,33 @@
+# cargo-audit configuration (read automatically by `cargo audit` from .cargo/audit.toml)
+# Every ignore MUST have a reason and should be re-reviewed when the blocking
+# upstream crate releases a fix.
+
+[advisories]
+ignore = [
+    # rsa: Marvin timing side-channel. No fixed release exists. rsa is only in
+    # Cargo.lock through sqlx-mysql, which is never compiled (postgres-only
+    # feature set); `cargo tree -i rsa --target all` prints nothing.
+    "RUSTSEC-2023-0071",
+
+    # rustls 0.22.4 / rustls-webpki 0.102.8 are pinned by serenity 0.12.5
+    # (tokio-tungstenite 0.21, Discord gateway websocket only). serenity 0.12.5
+    # is the latest release, so no lockfile-only fix exists. Impact is low:
+    # the only peer is gateway.discord.gg with a public-CA cert.
+    "RUSTSEC-2026-0346", # rustls Debug impls expose secrets (local, needs Debug-printing a session)
+    "RUSTSEC-2026-0349", # rustls ServerHello PQ-hybrid -> classical downgrade
+    "RUSTSEC-2026-0049", # webpki CRL distribution point matching (CRLs not used)
+    "RUSTSEC-2026-0098", # webpki URI name constraints
+    "RUSTSEC-2026-0099", # webpki wildcard name constraints
+    "RUSTSEC-2026-0104", # webpki CRL parsing panic (CRLs not used)
+    "RUSTSEC-2026-0382", # webpki distrusted intermediates
+
+    # lru 0.16.4 (unsound on panic in LruCache::pop) is pinned by aws-sdk-s3
+    # 1.132.0 (latest 1.x) for the S3 Express session cache, which rustfs
+    # never uses.
+    "RUSTSEC-2026-0253",
+]
+informational_warnings = ["unmaintained", "unsound", "notice"]
+
+[output]
+deny = ["unsound", "yanked"]
+quiet = false

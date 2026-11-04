@@ -1,0 +1,60 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/)
+# Run: cargo deny check advisories bans licenses sources
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[advisories]
+version = 2
+yanked = "deny"
+# RUSTSEC-2023-0071 (rsa) is ignored in .cargo/audit.toml only: cargo-deny prunes the
+# uncompiled sqlx-mysql subtree, so it never matches here. RUSTSEC-2026-0253 (lru,
+# unsound) is also only in audit.toml: cargo-deny reports unsound advisories for
+# workspace-direct dependencies only.
+ignore = [
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.22 pinned by serenity 0.12.5 (latest); Debug-print only" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.22 pinned by serenity 0.12.5 (latest); PQ downgrade, gateway only" },
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102 pinned by serenity 0.12.5; CRLs unused" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102 pinned by serenity 0.12.5; public-CA peer only" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102 pinned by serenity 0.12.5; public-CA peer only" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102 pinned by serenity 0.12.5; CRLs unused" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.102 pinned by serenity 0.12.5; public-CA peer only" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Permissive only: anything copyleft (GPL/LGPL/AGPL/MPL/EUPL) or unknown fails.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+
+[licenses.private]
+# The workspace crates are `publish = false` and carry no license field yet.
+ignore = true
+
+[bans]
+# Duplicates (2 async-openai versions, serenity's older TLS stack, ...) are
+# reported, not fatal.
+multiple-versions = "warn"
+# `unidb` is a git dependency without a version requirement; cargo-deny counts
+# that as a wildcard. Its exact commit is pinned in Cargo.lock.
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/Vimothy-s-Vestibule/unidb-schema"]
