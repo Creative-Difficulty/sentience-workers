@@ -8,15 +8,18 @@ description = "Shared plumbing for the LLM workers (fact-extractor, topic-sorter
 [features]
 # Integration-test harness (fresh Postgres database per test, schema loading,
 # seed helpers, mocked LLM responses). Only enabled from dev-dependencies.
-test-support = ["dep:serde_json", "dep:uuid", "dep:chrono", "dep:wiremock"]
+test-support = ["dep:uuid", "dep:chrono", "dep:wiremock"]
 
 [dependencies]
 color-eyre = { workspace = true }
+dotenvy = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 sqlx = { workspace = true }
-serde_json = { version = "1", optional = true }
+async-openai = { version = "0.38", features = ["chat-completion", "native-tls"] }
+reqwest = { version = "0.13", default-features = false }
+serde_json = "1"
 uuid = { version = "1", features = ["v4"], optional = true }
 chrono = { version = "0.4", optional = true }
 wiremock = { version = "0.6", optional = true }

@@ -28,3 +28,9 @@ async-openai = { version = "0.38", features = [
 [dev-dependencies]
 llm-worker-common = { path = "../llm-worker-common", features = ["test-support"] }
 wiremock = "0.6"
+
+[[bin]]
+name = "fact-extractor"
+path = "src/main.rs"
+# main.rs is a thin wrapper without tests; avoid building an empty test binary
+test = false

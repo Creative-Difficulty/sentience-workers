@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
-async-openai = { version = "0.37", features = [
+async-openai = { version = "0.38", features = [
     "chat-completion",
     "native-tls",
 ] }
@@ -23,3 +23,9 @@ async-openai = { version = "0.37", features = [
 [dev-dependencies]
 llm-worker-common = { path = "../llm-worker-common", features = ["test-support"] }
 wiremock = "0.6"
+
+[[bin]]
+name = "topic-sorter"
+path = "src/main.rs"
+# main.rs is a thin wrapper without tests; avoid building an empty test binary
+test = false
