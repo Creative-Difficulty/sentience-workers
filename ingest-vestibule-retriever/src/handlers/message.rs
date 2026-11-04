@@ -45,14 +45,17 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
     db::insert_message(&ctx.db_pool, &row).await?;
     cache_insert(&ctx.message_id_cache, row.message_id);
 
-    if !msg.attachments.is_empty() {
-        if let Err(e) = insert_message_attachments(ctx, msg).await {
-            tracing::error!(error = %e, "Failed to process attachments");
-        }
+    // Attachments and stickers are independent: a sticker-only message has no attachments.
+    if !msg.attachments.is_empty()
+        && let Err(e) = insert_message_attachments(ctx, msg).await
+    {
+        tracing::error!(error = %e, "Failed to process attachments");
+    }
 
-        if let Err(e) = insert_stickers(ctx, msg).await {
-            tracing::error!(error = %e, "Failed to process stickers");
-        }
+    if !msg.sticker_items.is_empty()
+        && let Err(e) = insert_stickers(ctx, msg).await
+    {
+        tracing::error!(error = %e, "Failed to process stickers");
     }
 
     Ok(())

@@ -169,3 +169,21 @@ async fn custom_emoji_reaction_stores_emoji_asset() {
         1
     );
 }
+
+/// Bug #5: stickers were only processed when the message also had attachments.
+#[tokio::test]
+async fn sticker_only_message_stores_sticker() {
+    let h = Harness::new().await;
+    let mut v = message_json(800, CHANNEL, user_json(7, "u7"), "");
+    v["sticker_items"] = json!([{"id": "4242", "name": "wave", "format_type": 1}]);
+    handlers::ensure_message(&h.ctx, &message(v)).await.unwrap();
+
+    assert!(
+        h.store.objects.lock().unwrap().contains_key("discord/stickers/4242.png"),
+        "sticker not uploaded"
+    );
+    assert_eq!(
+        h.count("SELECT count(*) FROM message_attachments ma JOIN media_assets a ON a.id = ma.asset_id WHERE ma.message_id = 800 AND a.object_key = 'discord/stickers/4242.png'").await,
+        1
+    );
+}
