@@ -1,43 +1,25 @@
-use std::env;
-
-use async_openai::{config::OpenAIConfig, Client};
 use color_eyre::eyre::WrapErr as _;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
-
-mod sorter;
-
-fn env_var(name: &str) -> color_eyre::Result<String> {
-    env::var(name).wrap_err_with(|| format!("missing required env var: {name}"))
-}
+use topic_sorter::{config::Config, llm, worker::Worker};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-
-    let default_filter = format!("{}=trace", env!("CARGO_CRATE_NAME"));
-    let filter =
-        tracing_subscriber::EnvFilter::try_new(env::var("RUST_LOG").unwrap_or(default_filter))?;
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(filter)
-        .init();
+    llm_worker_common::init_tracing(env!("CARGO_CRATE_NAME"))?;
 
     dotenvy::dotenv().ok();
 
+    let db_url =
+        std::env::var("DATABASE_URL").wrap_err("missing required env var: DATABASE_URL")?;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
-        .connect(&env_var("DATABASE_URL")?)
+        .connect(&db_url)
         .await
         .wrap_err("failed to connect to DATABASE_URL")?;
 
     tokio::fs::write("/tmp/ready", "1").await?;
 
-    let config = OpenAIConfig::new()
-        .with_api_base(env_var("LLM_BASE_URL")?)
-        .with_api_key(env_var("LLM_API_KEY")?);
-    let client = Client::with_config(config);
-    let model = env_var("LLM_MODEL")?;
+    let config = Config::from_env()?;
+    let client = llm::build_client(&config);
 
-    sorter::run(&pool, &client, &model).await
+    Worker::new(pool, client, &config).run().await
 }

@@ -1,3 +1,5 @@
+//! The polling loop: fetch unclassified messages, ask the LLM, store topics.
+
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -15,54 +17,51 @@ use sqlx::PgPool;
 use unidb::Message;
 use uuid::Uuid;
 
-const SYSTEM: &str = r#"
-Return JSON only. No prose, no code fences.
+use crate::config::Config;
+use crate::prompt::SYSTEM;
 
-Group chat messages by topic.
-
-Rules:
-- Topic labels: 1–5 words, lowercase, descriptive not restating. E.g. "rust borrow checker", "lunch logistics".
-- Reuse the same label for continuations of one topic; don't invent variants.
-- Skip greetings, acknowledgments, jokes, one-offs, system messages.
-- Only emit a group with 2+ messages. Never emit singletons.
-- Each message belongs to at most one group. Group by topic, not adjacency — interleaved threads still group together.
-- `message_ids` must use the exact integer IDs from the input. Don't invent, reorder, or omit.
-
-Schema:
-{
-  "groups": [
-    { "topic": "<string, 1-5 words lowercase>", "message_ids": [<int>, <int>, ...] }
-  ]
-}
-
-If nothing groups, return: { "groups": [] }
-No other keys. No null, comments, or trailing commas.
-
-Good example:
-Input:
-1: "ramen spot near the office?"
-2: "morning all"
-3: "ichiran on 5th is solid"
-4: "deploy failed last night"
-5: "migration didn't run"
-6: "tonkotsu at menya is better"
-7: "thanks!"
-8: "rolling back the migration"
-
-Output:
-{"groups":[{"topic":"ramen recommendations","message_ids":[1,3,6]},{"topic":"deploy failure","message_ids":[4,5,8]}]}"#;
-
-const BATCH_SIZE: i64 = 50;
 const CONTEXT_SIZE: i64 = 50;
 const IDLE_SLEEP: Duration = Duration::from_secs(5);
 
-#[tracing::instrument(skip_all)]
-pub async fn run(
-    pool: &PgPool,
-    client: &Client<OpenAIConfig>,
-    model: &str,
-) -> color_eyre::Result<()> {
-    loop {
+/// What one [`Worker::process_batch`] call did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BatchOutcome {
+    /// Messages fetched from the queue.
+    pub fetched: usize,
+    /// Messages recorded in `message_classification_attempts`.
+    pub attempted: usize,
+}
+
+pub struct Worker {
+    pool: PgPool,
+    client: Client<OpenAIConfig>,
+    model: String,
+    batch_size: i64,
+}
+
+impl Worker {
+    pub fn new(pool: PgPool, client: Client<OpenAIConfig>, config: &Config) -> Self {
+        Worker {
+            pool,
+            client,
+            model: config.llm_model.clone(),
+            batch_size: config.batch_size,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn run(&self) -> color_eyre::Result<()> {
+        loop {
+            let outcome = self.process_batch().await?;
+            if outcome.fetched == 0 || outcome.attempted == 0 {
+                tokio::time::sleep(IDLE_SLEEP).await;
+            }
+        }
+    }
+
+    /// Fetch one batch of unclassified messages and process it.
+    pub async fn process_batch(&self) -> color_eyre::Result<BatchOutcome> {
+        let (pool, client, model) = (&self.pool, &self.client, self.model.as_str());
         let batch = sqlx::query_as!(
             Message,
             r#"SELECT m.* FROM messages m
@@ -73,18 +72,18 @@ pub async fn run(
                  AND m.content != '[deleted message]'
                ORDER BY m.channel_id, m.sent_at
                LIMIT $1"#,
-            BATCH_SIZE
+            self.batch_size
         )
         .fetch_all(pool)
         .await?;
 
         if batch.is_empty() {
             tracing::debug!("no unclassified messages, waiting...");
-            tokio::time::sleep(IDLE_SLEEP).await;
-            continue;
+            return Ok(BatchOutcome::default());
         }
 
         tracing::info!(count = batch.len(), "processing batch");
+        let fetched = batch.len();
 
         let mut msgs_by_channel: HashMap<i64, Vec<Message>> = HashMap::new();
         for message in batch {
@@ -102,9 +101,7 @@ pub async fn run(
             }
         }
 
-        if attempted.is_empty() {
-            tokio::time::sleep(IDLE_SLEEP).await;
-        } else {
+        if !attempted.is_empty() {
             sqlx::query!(
                 r#"INSERT INTO message_classification_attempts (message_id)
                    SELECT m FROM UNNEST($1::bigint[]) AS m
@@ -114,6 +111,10 @@ pub async fn run(
             .execute(pool)
             .await?;
         }
+        Ok(BatchOutcome {
+            fetched,
+            attempted: attempted.len(),
+        })
     }
 }
 

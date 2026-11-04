@@ -1,25 +1,14 @@
-use std::time::Duration;
+//! System prompt and chat-completion request construction.
 
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
-        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ResponseFormat,
-        ResponseFormatJsonSchema,
-    },
+use async_openai::types::chat::{
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
+    CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
-use chrono::{DateTime, Utc};
-use color_eyre::eyre::eyre;
-use ormlite::Model as _;
-use serde::Deserialize;
-use sqlx::PgPool;
-use unidb::{
-    ActivityRecordType, ActivitySource, FactAndActivityEvidence, Message, UserFactAndActivity,
-};
-use uuid::Uuid;
+use chrono::Utc;
+use unidb::Message;
 
-const SYSTEM: &str = r#"
+pub const SYSTEM: &str = r#"
 Return JSON matching the schema below. No prose, no markdown code fences, JSON only.
 
 You extract durable facts, activities, and skills about the AUTHOR of a single chat message, for long-term memory storage.
@@ -163,244 +152,7 @@ Output:
 
 # The current reference time is:"#;
 
-const BATCH_SIZE: i64 = 25;
-const IDLE_SLEEP: Duration = Duration::from_secs(5);
-const MIN_CONTENT_LEN: i32 = 10;
-const CONTEXT_SIZE: i64 = 10;
-
-#[derive(Debug, Deserialize)]
-struct ExtractedRecord {
-    kind: ActivityRecordType,
-    #[serde(rename = "type")]
-    type_str: String,
-    value: String,
-    confidence: f32,
-    reasoning: String,
-    started_at: Option<DateTime<Utc>>,
-    ended_at: Option<DateTime<Utc>>,
-    level: Option<i16>,
-    is_current: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LLMResponse {
-    records: Vec<ExtractedRecord>,
-}
-
-#[tracing::instrument(skip_all)]
-pub async fn run(
-    pool: &PgPool,
-    client: &Client<OpenAIConfig>,
-    model: &str,
-    server_name: String,
-) -> color_eyre::Result<()> {
-    loop {
-        let batch = sqlx::query_as!(
-            Message,
-            r#"SELECT m.* FROM messages m
-           WHERE NOT EXISTS (
-               SELECT 1 FROM fact_extraction_attempts fea
-               WHERE fea.message_id = m.message_id
-           )
-             AND m.deleted_at IS NULL
-             AND m.content != '[deleted message]'
-             AND char_length(m.content) >= $1
-           ORDER BY m.sent_at
-           LIMIT $2"#,
-            MIN_CONTENT_LEN,
-            BATCH_SIZE
-        )
-        .fetch_all(pool)
-        .await?;
-
-        if batch.is_empty() {
-            tracing::debug!("no unattempted messages, waiting...");
-            tokio::time::sleep(IDLE_SLEEP).await;
-            continue;
-        }
-
-        tracing::info!(count = batch.len(), "processing batch");
-
-        let mut attempted = Vec::with_capacity(batch.len());
-        for msg in batch {
-            match process_message(pool, client, model, &msg, server_name.clone()).await {
-                Ok(()) => attempted.push(msg.message_id),
-                Err(e) => {
-                    tracing::error!(message_id = msg.message_id, error = %e, "extraction failed")
-                }
-            }
-        }
-
-        if attempted.is_empty() {
-            tokio::time::sleep(IDLE_SLEEP).await;
-        } else {
-            sqlx::query!(
-                r#"INSERT INTO fact_extraction_attempts (message_id)
-           SELECT m FROM UNNEST($1::bigint[]) AS m
-           ON CONFLICT (message_id) DO NOTHING"#,
-                attempted.as_slice()
-            )
-            .execute(pool)
-            .await?;
-        }
-    }
-}
-
-#[tracing::instrument(skip_all, fields(message_id = msg.message_id))]
-async fn process_message(
-    pool: &PgPool,
-    client: &Client<OpenAIConfig>,
-    model: &str,
-    msg: &Message,
-    server_name: String,
-) -> color_eyre::Result<()> {
-    let user_id = sqlx::query_scalar!(
-        "SELECT vestibule_user_id FROM discord_accounts WHERE discord_user_id = $1",
-        msg.sent_by
-    )
-    .fetch_one(pool)
-    .await?;
-
-    let reply_target = fetch_reply_target(pool, msg).await?;
-    let mut context = fetch_context(pool, msg).await?;
-    if let Some(ref rt) = reply_target {
-        context.retain(|c| c.message_id != rt.message_id);
-    }
-    tracing::debug!(
-        context_len = context.len(),
-        has_reply_target = reply_target.is_some(),
-        "fetched surrounding context"
-    );
-
-    let has_attachments = sqlx::query_scalar!(
-        r#"SELECT EXISTS(
-               SELECT 1 FROM message_attachments
-               WHERE message_id = $1 AND deleted_at IS NULL
-           ) AS "exists!""#,
-        msg.message_id,
-    )
-    .fetch_one(pool)
-    .await?;
-
-    let channel_name = sqlx::query_scalar!(
-        "SELECT name FROM discord_channels WHERE channel_id = $1",
-        msg.channel_id,
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    let request = build_extract_llm_request(
-        model,
-        msg,
-        &context,
-        reply_target.as_ref(),
-        has_attachments,
-        server_name,
-        channel_name,
-    )?;
-    tracing::debug!(%model, msg_len = msg.content.len(), has_attachments, "sending extract request");
-
-    let raw = client
-        .chat()
-        .create(request)
-        .await?
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .ok_or_else(|| eyre!("no content in LLM response"))?;
-
-    tracing::debug!(
-        content = raw.chars().take(50).collect::<String>(),
-        "received LLM response"
-    );
-
-    let extracted = serde_json::from_str::<LLMResponse>(&raw)
-        .map_err(|e| eyre!("failed to parse LLM JSON for fact extraction: {e}\nraw: {raw}"))?
-        .records;
-
-    tracing::debug!(record_count = extracted.len(), "LLM returned records");
-
-    if extracted.is_empty() {
-        return Ok(());
-    }
-
-    let mut tx = pool.begin().await?;
-    for record in &extracted {
-        let fact = build_fact(user_id, msg.sent_at, record);
-        let evidence = FactAndActivityEvidence {
-            id: Uuid::new_v4(),
-            fact_or_activity_id: fact.id,
-            message_id: Some(msg.message_id),
-            youtube_comment_id: None,
-            external_content_id: None,
-            discord_presence_id: None,
-            weight: record.confidence,
-            reasoning: record.reasoning.clone(),
-        };
-        fact.insert(&mut *tx).await?;
-        evidence.insert(&mut *tx).await?;
-    }
-    tx.commit().await?;
-
-    tracing::info!(count = extracted.len(), "inserted records");
-    Ok(())
-}
-
-async fn fetch_context(pool: &PgPool, focal_msg: &Message) -> color_eyre::Result<Vec<Message>> {
-    let mut before = sqlx::query_as!(
-        Message,
-        r#"SELECT m.* FROM messages m
-           WHERE m.channel_id = $1 AND m.sent_at < $2 AND m.message_id != $3 AND m.deleted_at IS NULL
-           ORDER BY m.sent_at DESC
-           LIMIT $4"#,
-        focal_msg.channel_id,
-        focal_msg.sent_at,
-        focal_msg.message_id,
-        CONTEXT_SIZE,
-    )
-    .fetch_all(pool)
-    .await?;
-    before.reverse();
-
-    let after = sqlx::query_as!(
-        Message,
-        r#"SELECT m.* FROM messages m
-           WHERE m.channel_id = $1 AND m.sent_at > $2 AND m.message_id != $3 AND m.deleted_at IS NULL
-           ORDER BY m.sent_at ASC
-           LIMIT $4"#,
-        focal_msg.channel_id,
-        focal_msg.sent_at,
-        focal_msg.message_id,
-        CONTEXT_SIZE,
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut all = before;
-    all.extend(after);
-    Ok(all)
-}
-
-async fn fetch_reply_target(
-    pool: &PgPool,
-    focal_msg: &Message,
-) -> color_eyre::Result<Option<Message>> {
-    let Some(reply_id) = focal_msg.in_reply_to else {
-        return Ok(None);
-    };
-    let target = sqlx::query_as!(
-        Message,
-        r#"SELECT m.* FROM messages m
-           WHERE m.message_id = $1 AND m.deleted_at IS NULL"#,
-        reply_id,
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(target)
-}
-
-fn build_system_prompt(
+pub fn build_system_prompt(
     context: &[Message],
     reply_target: Option<&Message>,
     focal_msg: &Message,
@@ -482,7 +234,7 @@ fn build_system_prompt(
     prompt
 }
 
-fn build_extract_llm_request(
+pub fn build_extract_llm_request(
     model: &str,
     focal_msg: &Message,
     context: &[Message],
@@ -546,47 +298,4 @@ fn build_extract_llm_request(
         })
         .build()?;
     Ok(request)
-}
-
-fn build_fact(
-    user_id: Uuid,
-    message_sent_at: DateTime<Utc>,
-    record: &ExtractedRecord,
-) -> UserFactAndActivity {
-    let (started_at, ended_at, level, is_current) = match record.kind {
-        ActivityRecordType::Activity => (
-            record.started_at.or(Some(message_sent_at)),
-            record.ended_at,
-            None,
-            None,
-        ),
-        // TODO implement outdated skill detection and setting is_current to false on old skill records
-        // or just remove the is_current thing entirely
-        ActivityRecordType::Skill => (
-            record.started_at.or(Some(message_sent_at)),
-            None,
-            record.level.map(|l| l.clamp(0, 10)),
-            Some(record.is_current.unwrap_or(true)),
-        ),
-        ActivityRecordType::Fact | ActivityRecordType::Emotion => {
-            (None, None, None, Some(record.is_current.unwrap_or(true)))
-        }
-    };
-
-    UserFactAndActivity {
-        id: Uuid::new_v4(),
-        user_id,
-        record_type: record.kind,
-        source: ActivitySource::LlmExtraction,
-        type_str: record.type_str.clone(),
-        value: record.value.clone(),
-        confidence: record.confidence,
-        level,
-        score_id: None,
-        started_at,
-        ended_at,
-        is_current,
-        created_at: Utc::now(),
-        type_value_embedding: None,
-    }
 }

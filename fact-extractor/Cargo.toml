@@ -7,7 +7,7 @@ edition = "2024"
 color-eyre = { workspace = true }
 dotenvy = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+llm-worker-common = { path = "../llm-worker-common" }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 ormlite = { workspace = true }
@@ -24,3 +24,7 @@ async-openai = { version = "0.38", features = [
     "chat-completion",
     "native-tls",
 ] }
+
+[dev-dependencies]
+llm-worker-common = { path = "../llm-worker-common", features = ["test-support"] }
+wiremock = "0.6"
