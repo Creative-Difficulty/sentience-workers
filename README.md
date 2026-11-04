@@ -12,6 +12,27 @@ Each microservice has its own README describing the service in greater detail, c
 - `fact-extractor` - Extracts facts about users, activities the users did, and emotions from discord messages using an LLM
 - `topic-sorter` - Sorts discord messages into topics which are created ad hoc; message "meaning" extraction and topic determination both use an LLM
 
+## Local full stack (no secrets needed)
+
+```sh
+docker compose up -d --wait   # or: make up
+make seed                     # optional: synthetic demo data (docker/seed/dev-seed.sql)
+```
+
+This starts Postgres (with the unidb schema), RustFS + bucket, a deterministic **mock LLM** (`docker/mock-llm`, OpenAI-compatible, no API key), `fact-extractor`, `topic-sorter` and the dashboard on <http://127.0.0.1:3000>. The dashboard is built from its git repository by default; set `DASH_CONTEXT=../Sentience-dash` to build a local checkout. The Discord ingester needs a real bot token and is therefore only started with `--profile app` (or `--profile discord`).
+
+| make target | what it does |
+| --- | --- |
+| `make up` / `make down` / `make clean` | start (and wait until healthy) / stop / stop and delete volumes |
+| `make build` / `make logs` / `make ps` | build images / follow logs / status |
+| `make seed` | load the synthetic seed into the running database |
+| `make e2e` | run `scripts/e2e.sh`: fresh throw-away project, seed without attempt rows, wait until both workers processed every message via the mock LLM, check `/`, `/explorer`, `/userdata`, `/userdata/<id>` and `/api/messages`, tear down; exits non-zero on failure |
+| `make test-mock-llm` | unit tests of the mock LLM |
+
+`scripts/e2e.sh` options: `E2E_PROJECT`, `E2E_TIMEOUT`, `E2E_KEEP=1`, `E2E_NO_BUILD=1`, `E2E_DASH_PORT` / `E2E_POSTGRES_PORT` / `E2E_RUSTFS_PORT` (random loopback ports by default).
+
+When `LLM_BASE_URL` is empty the workers use the mock LLM, so a `.env` copied from `.env.example` without LLM values still works locally (and produces mock data only).
+
 ## Deployment
 
 All three services are dockerized. The easiest way to run/deploy all of them is to use docker compose.
@@ -21,7 +42,7 @@ Before starting the stack, copy `.env.example` to `.env` and fill in the values.
 > [!IMPORTANT]
 > Pick these values once and don't change them after first start. RustFS encrypts its IAM config with the initial secret key and refuses to start with different credentials later (`crypto: decrypt failed`). Rotating them requires wiping the `rustfs_data` docker volume, which deletes all stored objects.
 
-Then run `docker compose --profile app up -d` (`-d` for `detached`, running in the background).
+Then run `docker compose --profile app up -d` (`-d` for `detached`, running in the background). This starts everything above plus the Discord ingester; with `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` set the workers use your LLM provider (the mock LLM container still runs but is unused), and the dashboard is served on `127.0.0.1:3000` (`DASH_PUBLISH` to change).
 
 ### Docker build notes
 
