@@ -40,6 +40,9 @@ pub trait DiscordApi: Send + Sync {
         after: Option<UserId>,
     ) -> color_eyre::Result<Vec<User>>;
 
+    /// Fetches a user.
+    async fn get_user(&self, user_id: UserId) -> color_eyre::Result<User>;
+
     /// All (non-thread) channels of a guild.
     async fn guild_channels(&self, guild_id: GuildId) -> color_eyre::Result<Vec<GuildChannel>>;
 
@@ -117,6 +120,10 @@ impl DiscordApi for SerenityDiscord {
                 after.map(|u| u.get()),
             )
             .await?)
+    }
+
+    async fn get_user(&self, user_id: UserId) -> color_eyre::Result<User> {
+        Ok(self.0.get_user(user_id).await?)
     }
 
     async fn guild_channels(&self, guild_id: GuildId) -> color_eyre::Result<Vec<GuildChannel>> {

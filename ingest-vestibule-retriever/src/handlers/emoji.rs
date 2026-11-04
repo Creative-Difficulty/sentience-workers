@@ -23,7 +23,7 @@ pub async fn handle_emoji_resolution(
         None => None,
     };
 
-    match db::insert_emoji(&ctx.db_pool, &spec, asset_id).await {
+    match db::resolve_emoji(&ctx.db_pool, &spec, asset_id).await {
         Ok(id) => Ok(Some(id)),
         Err(e) => {
             tracing::error!(error = %e, "Failed to insert discord emoji");

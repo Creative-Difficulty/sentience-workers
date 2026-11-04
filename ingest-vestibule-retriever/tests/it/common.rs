@@ -234,6 +234,11 @@ impl DiscordApi for FakeDiscord {
             .collect())
     }
 
+    async fn get_user(&self, user_id: UserId) -> color_eyre::Result<User> {
+        self.log(format!("get_user {user_id}"));
+        Ok(user(user_id.get(), &format!("user{user_id}")))
+    }
+
     async fn guild_channels(&self, _guild_id: GuildId) -> color_eyre::Result<Vec<GuildChannel>> {
         let st = self.0.lock().unwrap();
         Ok(st

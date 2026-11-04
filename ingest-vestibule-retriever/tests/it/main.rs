@@ -8,4 +8,5 @@ mod edits;
 mod handlers;
 mod historical;
 mod mapping;
+mod reactions;
 mod users;

@@ -34,7 +34,12 @@ pub async fn insert_all_reactions_for_message(
             }
         }
 
-        let emoji_id = handle_emoji_resolution(ctx, &reaction.reaction_type, msg.guild_id).await?;
+        let Some(emoji_id) =
+            handle_emoji_resolution(ctx, &reaction.reaction_type, msg.guild_id).await?
+        else {
+            tracing::warn!("Unknown reaction type, skipping");
+            continue;
+        };
 
         for user in users {
             if let Err(e) = crate::handlers::ensure_user(ctx, &user).await {
@@ -42,9 +47,8 @@ pub async fn insert_all_reactions_for_message(
                 continue;
             }
 
-            // ON CONFLICT DO NOTHING avoids duplicate key errors if the reaction was
-            // already inserted by the live event handler or a previous scan run.
-            if let Err(e) = db::insert_reaction_ignore_duplicate(
+            // Duplicates (live handler, previous scan run) are ignored.
+            if let Err(e) = db::insert_reaction(
                 &ctx.db_pool,
                 snowflake(msg.id.get()),
                 snowflake(user.id.get()),

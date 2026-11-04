@@ -3,8 +3,8 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use ormlite::Model as _;
-use sqlx::PgPool;
-use unidb::models::{DiscordChannel, DiscordEmoji, MediaAsset, MessageAttachment, MessageReaction};
+use sqlx::{Connection as _, PgPool};
+use unidb::models::{DiscordChannel, MediaAsset, MessageAttachment};
 use uuid::Uuid;
 
 use crate::mapping::{EmojiSpec, MessageRow, UserRow};
@@ -157,6 +157,25 @@ pub async fn mark_message_deleted(pool: &PgPool, message_id: i64) -> color_eyre:
 // users
 // ---------------------------------------------------------------------------------------------
 
+async fn insert_account(
+    conn: &mut sqlx::PgConnection,
+    row: &UserRow,
+    vestibule_user_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query!(
+        "INSERT INTO discord_accounts (discord_user_id, vestibule_user_id, username, display_name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (discord_user_id) DO NOTHING",
+        row.discord_user_id,
+        vestibule_user_id,
+        row.username,
+        row.display_name
+    )
+    .execute(conn)
+    .await?
+    .rows_affected())
+}
+
 /// Result of [`ensure_user_rows`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnsureUser {
@@ -180,9 +199,11 @@ pub fn stale_username(username: &str, discord_user_id: i64) -> String {
 ///   the same user (live events + historical scan race on new users), so no orphan
 ///   `vestibule_users` rows are created.
 /// * `discord_accounts.username` is `UNIQUE`, but Discord usernames are only unique at a point in
-///   time and can be changed and re-used. If another (necessarily stale) account still holds the
-///   username, that row's username is renamed to [`stale_username`] so the current holder can be
-///   inserted. Without this, every message of the new user would fail its FK forever.
+///   time and can be changed and re-used. If the insert hits that UNIQUE because another
+///   (necessarily stale) account still holds the username, that row's username is renamed to
+///   [`stale_username`] and the insert retried, so the current holder can be inserted. Without
+///   this, every message of the new user would fail its FK forever. On a schema without the
+///   UNIQUE nothing is renamed.
 pub async fn ensure_user_rows(pool: &PgPool, row: &UserRow) -> color_eyre::Result<EnsureUser> {
     let mut tx = pool.begin().await?;
     sqlx::query!("SELECT pg_advisory_xact_lock($1)", row.discord_user_id)
@@ -201,22 +222,6 @@ pub async fn ensure_user_rows(pool: &PgPool, row: &UserRow) -> color_eyre::Resul
         return Ok(EnsureUser::Existing);
     }
 
-    let displaced = sqlx::query!(
-        "UPDATE discord_accounts SET username = username || '#stale-' || discord_user_id::text
-         WHERE username = $1 AND discord_user_id <> $2",
-        row.username,
-        row.discord_user_id
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if displaced > 0 {
-        tracing::warn!(
-            username = %row.username,
-            "username was held by a stale discord account; renamed the stale account"
-        );
-    }
-
     let vestibule_user_id = Uuid::new_v4();
     sqlx::query!(
         "INSERT INTO vestibule_users (id, nickname) VALUES ($1, $2)",
@@ -226,18 +231,37 @@ pub async fn ensure_user_rows(pool: &PgPool, row: &UserRow) -> color_eyre::Resul
     .execute(&mut *tx)
     .await?;
 
-    let inserted = sqlx::query!(
-        "INSERT INTO discord_accounts (discord_user_id, vestibule_user_id, username, display_name)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (discord_user_id) DO NOTHING",
-        row.discord_user_id,
-        vestibule_user_id,
-        row.username,
-        row.display_name
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    // First attempt inside a savepoint: on a schema where `username` is UNIQUE, a stale holder of
+    // the username makes it fail with unique_violation on that constraint.
+    let mut attempt = tx.begin().await?;
+    let first = insert_account(&mut attempt, row, vestibule_user_id).await;
+    let inserted = match first {
+        Ok(n) => {
+            attempt.commit().await?;
+            n
+        }
+        Err(sqlx::Error::Database(e))
+            if e.is_unique_violation() && e.constraint() != Some("discord_accounts_pkey") =>
+        {
+            attempt.rollback().await?;
+            let displaced = sqlx::query!(
+                "UPDATE discord_accounts SET username = username || '#stale-' || discord_user_id::text
+                 WHERE username = $1 AND discord_user_id <> $2",
+                row.username,
+                row.discord_user_id
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            tracing::warn!(
+                username = %row.username,
+                displaced,
+                "username was held by a stale discord account; renamed the stale account"
+            );
+            insert_account(&mut tx, row, vestibule_user_id).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     if inserted == 0 {
         // Lost a race with a writer that does not take the advisory lock: drop our
@@ -337,57 +361,68 @@ pub async fn find_emoji(pool: &PgPool, discord_emoji_id: &str) -> color_eyre::Re
     .await?)
 }
 
-/// Inserts an emoji row and returns its id.
-pub async fn insert_emoji(
+/// Returns the id of the emoji with `spec.discord_emoji_id`, inserting it if missing.
+///
+/// `discord_emojis.discord_emoji_id` has no UNIQUE constraint on the current schema, so a plain
+/// lookup-then-insert races (concurrent reactions with a new emoji created duplicates). The
+/// lookup and insert run in one transaction under an advisory lock keyed on the emoji id
+/// (two-int key space, so it cannot collide with the bigint user-id locks). Works with and
+/// without a UNIQUE on `discord_emoji_id`.
+pub async fn resolve_emoji(
     pool: &PgPool,
     spec: &EmojiSpec,
     asset_id: Option<Uuid>,
 ) -> color_eyre::Result<Uuid> {
-    let id = Uuid::new_v4();
-    DiscordEmoji {
-        id,
-        discord_emoji_id: spec.discord_emoji_id.clone(),
-        from_guild: spec.from_guild.clone(),
-        emoji_display_name: spec.display_name.clone(),
-        is_animated: spec.is_animated,
-        emoji_url: spec.emoji_url.clone(),
-        asset_id,
-    }
-    .insert(pool)
+    let mut tx = pool.begin().await?;
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(1, hashtext($1))",
+        spec.discord_emoji_id
+    )
+    .execute(&mut *tx)
     .await?;
+
+    if let Some(id) = sqlx::query_scalar!(
+        "SELECT id FROM discord_emojis WHERE discord_emoji_id = $1 ORDER BY id LIMIT 1",
+        spec.discord_emoji_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(id);
+    }
+
+    let id = Uuid::new_v4();
+    sqlx::query!(
+        "INSERT INTO discord_emojis (id, discord_emoji_id, from_guild, emoji_display_name, is_animated, emoji_url, asset_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        id,
+        spec.discord_emoji_id,
+        spec.from_guild,
+        spec.display_name,
+        spec.is_animated,
+        spec.emoji_url,
+        asset_id
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
-/// Plain insert of a reaction (used by the live handler).
+/// Inserts a reaction; duplicates (same message, user, emoji) are ignored. Returns whether a
+/// row was written. Uses a bare `ON CONFLICT DO NOTHING` so it works with both
+/// `UNIQUE (message_id, user_id, emoji_id)` and `UNIQUE NULLS NOT DISTINCT (...)`.
 pub async fn insert_reaction(
     pool: &PgPool,
     message_id: i64,
     user_id: i64,
-    emoji_id: Option<Uuid>,
-) -> color_eyre::Result<()> {
-    MessageReaction {
-        id: Uuid::new_v4(),
-        message_id,
-        user_id,
-        emoji_id,
-        reacted_at: Utc::now(),
-    }
-    .insert(pool)
-    .await?;
-    Ok(())
-}
-
-/// Insert of a reaction that ignores duplicates (used by the historical scan).
-pub async fn insert_reaction_ignore_duplicate(
-    pool: &PgPool,
-    message_id: i64,
-    user_id: i64,
-    emoji_id: Option<Uuid>,
-) -> color_eyre::Result<()> {
-    sqlx::query!(
+    emoji_id: Uuid,
+) -> color_eyre::Result<bool> {
+    let res = sqlx::query!(
         "INSERT INTO message_reactions (id, message_id, user_id, emoji_id, reacted_at)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (message_id, user_id, emoji_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
         Uuid::new_v4(),
         message_id,
         user_id,
@@ -396,7 +431,7 @@ pub async fn insert_reaction_ignore_duplicate(
     )
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 pub async fn delete_reaction(

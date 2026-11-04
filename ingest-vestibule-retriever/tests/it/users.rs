@@ -82,9 +82,15 @@ async fn failed_ensure_user_is_not_cached() {
     assert!(!h.ctx.user_id_cache.read().unwrap().contains(&3));
 }
 
+/// Schema-dependent: with `UNIQUE (username)` (unidb main) the stale holder is renamed; without
+/// it (unidb-schema PR "schema-integrity") both rows keep their username and nothing is renamed.
 #[tokio::test]
-async fn stale_username_holder_is_renamed_not_deleted() {
+async fn stale_username_holder_is_renamed_only_when_unique() {
     let h = Harness::new().await;
+    let unique = h
+        .count("SELECT count(*) FROM pg_constraint WHERE conrelid = 'discord_accounts'::regclass AND contype = 'u' AND pg_get_constraintdef(oid) = 'UNIQUE (username)'")
+        .await
+        == 1;
     handlers::ensure_user(&h.ctx, &user(1, "reused"))
         .await
         .unwrap();
@@ -96,9 +102,10 @@ async fn stale_username_holder_is_renamed_not_deleted() {
             .fetch_all(h.pool())
             .await
             .unwrap();
+    let stale = if unique { "reused#stale-1" } else { "reused" };
     assert_eq!(
         names,
-        vec![(1, "reused#stale-1".to_string()), (2, "reused".to_string())]
+        vec![(1, stale.to_string()), (2, "reused".to_string())]
     );
     assert_eq!(
         ingest_vestibule_retriever::db::stale_username("reused", 1),
