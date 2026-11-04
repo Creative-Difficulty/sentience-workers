@@ -2,6 +2,7 @@
 name = "ingest-vestibule-retriever"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 color-eyre = { workspace = true }
@@ -19,5 +20,14 @@ chrono = "0.4.44"
 uuid = { version = "1.23.1", features = ["v8"] }
 sha2 = "0.11"
 hex = "0.4.3"
-aws-config = "1.8.16"
-aws-sdk-s3 = "1.131.0"
+# Static credentials + rustfs endpoint only: drop the legacy hyper 0.14 /
+# rustls 0.21 client ("rustls" feature), SigV4a (p256/crypto-bigint) and SSO.
+aws-config = { version = "1.8.16", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
+aws-sdk-s3 = { version = "1.131.0", default-features = false, features = [
+    "default-https-client",
+    "http-1x",
+    "rt-tokio",
+] }
