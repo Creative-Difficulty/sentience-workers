@@ -44,7 +44,7 @@ async fn duplicate_reaction_add_is_idempotent() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_new_emoji_is_inserted_once() {
     let users: Vec<u64> = (100..116).collect();
     let h = setup(&users).await;

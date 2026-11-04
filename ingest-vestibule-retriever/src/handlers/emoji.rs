@@ -19,7 +19,7 @@ pub async fn handle_emoji_resolution(
 
     let asset_id = match &spec.asset {
         // Download emoji and store as a media asset via S3 object key
-        Some(asset) => Some(super::attachments::download_and_store_media_asset(ctx, asset).await?),
+        Some(asset) => Some(super::attachments::store_media_asset(ctx, asset).await?),
         None => None,
     };
 

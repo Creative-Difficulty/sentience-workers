@@ -4,20 +4,23 @@ use serenity::all::Message;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Downloads `spec.url`, and stores it in the object store + `media_assets`.
-/// If identical content (by SHA-256) is already stored, the existing asset id is returned instead
-/// of uploading twice. Because the upload happens first, the worst case is a stray object.
-pub async fn download_and_store_media_asset(
-    ctx: &AppCtx,
-    spec: &AssetSpec,
-) -> color_eyre::Result<Uuid> {
-    let bytes = match ctx.fetcher.fetch(&spec.url).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(error = %e, url = %spec.url, "Failed to download media");
-            return Err(e);
-        }
-    };
+/// Makes sure the media described by `spec` is stored and returns its `media_assets.id`.
+///
+/// 1. An asset already stored under `spec.object_key` is reused without downloading.
+/// 2. The download is hashed; identical content already stored (any key) is reused without
+///    uploading, so identical avatars/attachments do not collide on the UNIQUE `content_hash`.
+/// 3. Otherwise the bytes are uploaded and only then the row is inserted. An upload failure
+///    returns an error and writes no row, so `media_assets` never points at a missing object.
+///    Concurrent inserts of the same content resolve to the winner's row.
+pub async fn store_media_asset(ctx: &AppCtx, spec: &AssetSpec) -> color_eyre::Result<Uuid> {
+    if let Some(existing) = db::find_asset_by_key(&ctx.db_pool, &spec.object_key).await? {
+        return Ok(existing);
+    }
+
+    let bytes = ctx.fetcher.fetch(&spec.url).await.map_err(|e| {
+        tracing::error!(error = %e, url = %spec.url, "Failed to download media");
+        e
+    })?;
 
     let content_hash = hex::encode(Sha256::digest(&bytes));
     if let Some(existing) = db::find_asset_by_hash(&ctx.db_pool, &content_hash).await? {
@@ -25,16 +28,15 @@ pub async fn download_and_store_media_asset(
     }
 
     let size_bytes = bytes.len() as i64;
-    if let Err(e) = ctx
-        .store
+    ctx.store
         .put(&spec.object_key, bytes, &spec.content_type)
         .await
-    {
-        tracing::error!(error = %e, object_key = %spec.object_key, "Failed to upload media to S3 bucket");
-        return Err(e);
-    }
+        .map_err(|e| {
+            tracing::error!(error = %e, object_key = %spec.object_key, "Failed to upload media");
+            e
+        })?;
 
-    match db::insert_media_asset(
+    db::insert_media_asset(
         &ctx.db_pool,
         &spec.content_type,
         &spec.object_key,
@@ -42,42 +44,6 @@ pub async fn download_and_store_media_asset(
         &content_hash,
     )
     .await
-    {
-        Ok(id) => Ok(id),
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to insert media asset");
-            Err(e)
-        }
-    }
-}
-
-/// Avatar variant: uploads and inserts the asset row, logging (not returning) errors.
-pub async fn store_media_asset_unchecked_avatar(ctx: &AppCtx, spec: &AssetSpec) {
-    let Ok(bytes) = ctx.fetcher.fetch(&spec.url).await else {
-        return;
-    };
-    let content_hash = hex::encode(Sha256::digest(&bytes));
-    let size_bytes = bytes.len() as i64;
-
-    if let Err(e) = ctx
-        .store
-        .put(&spec.object_key, bytes, &spec.content_type)
-        .await
-    {
-        tracing::error!(error = %e, object_key = %spec.object_key, "Failed to write avatar to S3 bucket");
-    }
-
-    if let Err(e) = db::insert_media_asset(
-        &ctx.db_pool,
-        &spec.content_type,
-        &spec.object_key,
-        size_bytes,
-        &content_hash,
-    )
-    .await
-    {
-        tracing::error!(error = %e, "Failed to insert avatar media asset");
-    }
 }
 
 #[tracing::instrument(skip_all, fields(message_id=msg.id.get(), attachment_id = tracing::field::Empty))]
@@ -87,19 +53,7 @@ pub async fn insert_message_attachments(ctx: &AppCtx, msg: &Message) -> color_ey
         tracing::Span::current().record("attachment_id", attachment.id.get());
         let spec = attachment_spec(msg, attachment);
 
-        match db::attachment_exists_by_key(&ctx.db_pool, message_id, &spec.object_key).await {
-            Ok(true) => {
-                tracing::debug!("Attachment is already stored in db attachments table, skipping");
-                continue;
-            }
-            Ok(false) => (),
-            Err(e) => {
-                tracing::error!(error=%e);
-                continue;
-            }
-        }
-
-        let asset_id = match download_and_store_media_asset(ctx, &spec).await {
+        let asset_id = match store_media_asset(ctx, &spec).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!(
@@ -110,15 +64,11 @@ pub async fn insert_message_attachments(ctx: &AppCtx, msg: &Message) -> color_ey
             }
         };
 
-        if let Err(e) = db::insert_message_attachment(&ctx.db_pool, message_id, asset_id).await {
-            tracing::error!(error=%e);
-            continue;
+        match db::insert_message_attachment(&ctx.db_pool, message_id, asset_id).await {
+            Ok(true) => tracing::debug!(%asset_id, "Stored attachment"),
+            Ok(false) => tracing::debug!(%asset_id, "Attachment already linked"),
+            Err(e) => tracing::error!(error=%e, "Failed to insert attachment row"),
         }
-
-        tracing::debug!(
-            asset_id = %asset_id,
-            "Stored attachment and inserted media asset and attachment row"
-        );
     }
 
     Ok(())
@@ -138,24 +88,16 @@ pub async fn insert_stickers(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<
             continue;
         };
 
-        if db::attachment_exists_by_key(&ctx.db_pool, message_id, &spec.object_key).await? {
-            continue;
-        }
-
-        let asset_id = match db::find_asset_by_key(&ctx.db_pool, &spec.object_key).await? {
-            Some(id) => id,
-            None => match download_and_store_media_asset(ctx, &spec).await {
-                Ok(u) => u,
-                Err(e) => {
-                    tracing::error!(error=%e);
-                    continue;
-                }
-            },
+        let asset_id = match store_media_asset(ctx, &spec).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!(error=%e, "Failed to store sticker");
+                continue;
+            }
         };
 
         if let Err(e) = db::insert_message_attachment(&ctx.db_pool, message_id, asset_id).await {
             tracing::error!(error=%e, "Failed to insert sticker attachment row");
-            continue;
         }
     }
     Ok(())

@@ -1,5 +1,5 @@
 use crate::db::EnsureUser;
-use crate::handlers::attachments::store_media_asset_unchecked_avatar;
+use crate::handlers::attachments::store_media_asset;
 use crate::mapping::{avatar_spec, user_row};
 use crate::{AppCtx, cache_contains, cache_insert, db};
 
@@ -16,14 +16,10 @@ pub async fn ensure_user(ctx: &AppCtx, user: &serenity::all::User) -> color_eyre
 
     if outcome == EnsureUser::Created
         && let Some(spec) = avatar_spec(user)
+        && let Err(e) = store_media_asset(ctx, &spec).await
     {
-        // Check if we already have this avatar
-        if db::find_asset_by_key(&ctx.db_pool, &spec.object_key)
-            .await?
-            .is_none()
-        {
-            store_media_asset_unchecked_avatar(ctx, &spec).await;
-        }
+        // The account is stored; a missing avatar is not worth failing the message for.
+        tracing::warn!(error = %e, "Failed to store avatar");
     }
 
     Ok(())

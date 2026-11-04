@@ -42,8 +42,12 @@ pub async fn ensure_message(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<(
         }
     }
 
-    db::insert_message(&ctx.db_pool, &row).await?;
+    let inserted = db::insert_message(&ctx.db_pool, &row).await?;
     cache_insert(&ctx.message_id_cache, row.message_id);
+    if !inserted {
+        // Another task (live event vs. historical scan) stored it and handles its media.
+        return Ok(());
+    }
 
     // Attachments and stickers are independent: a sticker-only message has no attachments.
     if !msg.attachments.is_empty()

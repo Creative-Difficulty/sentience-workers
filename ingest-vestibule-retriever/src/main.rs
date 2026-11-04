@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use aws_sdk_s3::config::Credentials;
-use ingest_vestibule_retriever::media::{HttpFetcher, S3Store};
+use ingest_vestibule_retriever::media::{HttpFetcher, MediaLimits, S3Store};
 use ingest_vestibule_retriever::startup::{self, ReadyFile};
 use serenity::all::GatewayIntents;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -34,9 +34,13 @@ async fn main() -> color_eyre::Result<()> {
 
     let s3_client = setup_s3(&env_vars).await?;
 
+    let media_limits = MediaLimits::from_env()?;
+    tracing::debug!(?media_limits, "media download limits");
+    let fetcher = HttpFetcher::with_limits(&media_limits)?;
+
     let handler = ingest_vestibule_retriever::discord_handler::DiscordEventHandler {
         db_pool,
-        fetcher: Arc::new(HttpFetcher::new(reqwest::Client::new())),
+        fetcher: Arc::new(fetcher),
         store: Arc::new(S3Store {
             client: s3_client,
             bucket: env_vars.s3_bucket_name.clone(),

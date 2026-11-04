@@ -3,7 +3,7 @@
 use crate::common::*;
 use ingest_vestibule_retriever::handlers;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_ensure_user_creates_exactly_one_user() {
     let h = Harness::new().await;
     let base_vu = h.count("SELECT count(*) FROM vestibule_users").await;

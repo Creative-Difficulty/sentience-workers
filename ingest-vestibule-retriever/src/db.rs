@@ -4,7 +4,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use ormlite::Model as _;
 use sqlx::{Connection as _, PgPool};
-use unidb::models::{DiscordChannel, MediaAsset, MessageAttachment};
+use unidb::models::DiscordChannel;
 use uuid::Uuid;
 
 use crate::mapping::{EmojiSpec, MessageRow, UserRow};
@@ -293,7 +293,9 @@ pub async fn find_asset_by_key(pool: &PgPool, key: &str) -> color_eyre::Result<O
     )
 }
 
-/// Inserts a media asset row and returns its id.
+/// Inserts a media asset row and returns its id. If an asset with the same `content_hash` or
+/// `object_key` already exists (both are UNIQUE; e.g. a concurrent download of identical content),
+/// the existing asset's id is returned instead of failing.
 pub async fn insert_media_asset(
     pool: &PgPool,
     content_type: &str,
@@ -301,51 +303,54 @@ pub async fn insert_media_asset(
     size_bytes: i64,
     content_hash: &str,
 ) -> color_eyre::Result<Uuid> {
-    let id = Uuid::new_v4();
-    MediaAsset {
-        id,
-        content_type: content_type.to_string(),
-        object_key: object_key.to_string(),
-        size_bytes: Some(size_bytes),
-        content_hash: Some(content_hash.to_string()),
-        embedding: None,
-    }
-    .insert(pool)
+    let inserted = sqlx::query_scalar!(
+        "INSERT INTO media_assets (id, content_type, object_key, size_bytes, content_hash)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT DO NOTHING
+         RETURNING id",
+        Uuid::new_v4(),
+        content_type,
+        object_key,
+        size_bytes,
+        content_hash
+    )
+    .fetch_optional(pool)
     .await?;
-    Ok(id)
-}
-
-/// Whether `message_id` already has an attachment whose asset has `object_key`.
-pub async fn attachment_exists_by_key(
-    pool: &PgPool,
-    message_id: i64,
-    object_key: &str,
-) -> color_eyre::Result<bool> {
-    Ok(sqlx::query_scalar!(
-        "SELECT ma.id FROM message_attachments ma WHERE ma.message_id = $1 AND ma.asset_id IN (SELECT id FROM media_assets WHERE object_key = $2)",
-        message_id,
+    if let Some(id) = inserted {
+        return Ok(id);
+    }
+    sqlx::query_scalar!(
+        "SELECT id FROM media_assets WHERE content_hash = $1 OR object_key = $2
+         ORDER BY (content_hash = $1) DESC LIMIT 1",
+        content_hash,
         object_key
     )
     .fetch_optional(pool)
     .await?
-    .is_some())
+    .ok_or_else(|| color_eyre::eyre::eyre!("media asset conflict but no existing row found"))
 }
 
+/// Links an asset to a message unless that exact link already exists. Returns whether a row was
+/// written.
 pub async fn insert_message_attachment(
     pool: &PgPool,
     message_id: i64,
     asset_id: Uuid,
-) -> color_eyre::Result<()> {
-    MessageAttachment {
-        id: Uuid::new_v4(),
+) -> color_eyre::Result<bool> {
+    let res = sqlx::query!(
+        "INSERT INTO message_attachments (id, message_id, asset_id, added_at)
+         SELECT $1, $2, $3, $4
+         WHERE NOT EXISTS (
+             SELECT 1 FROM message_attachments WHERE message_id = $2 AND asset_id = $3
+         )",
+        Uuid::new_v4(),
         message_id,
         asset_id,
-        added_at: Utc::now(),
-        deleted_at: None,
-    }
-    .insert(pool)
+        Utc::now()
+    )
+    .execute(pool)
     .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 // ---------------------------------------------------------------------------------------------
