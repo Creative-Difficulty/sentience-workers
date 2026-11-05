@@ -159,6 +159,18 @@ pub fn channel_json(id: u64, kind: u8, name: &str, parent: Option<u64>) -> Value
     })
 }
 
+/// A thread (type 11) of `parent`; archived threads get an `archive_timestamp`.
+pub fn thread_channel(id: u64, parent: u64, archived_at: Option<&str>) -> GuildChannel {
+    let mut v = channel_json(id, 11, &format!("thread{id}"), Some(parent));
+    v["thread_metadata"] = json!({
+        "archived": archived_at.is_some(),
+        "archive_timestamp": archived_at.unwrap_or("2024-01-01T00:00:00.000000+00:00"),
+        "auto_archive_duration": 60,
+        "locked": false,
+    });
+    serde_json::from_value(v).expect("thread fixture")
+}
+
 pub fn guild_channel(id: u64, kind: u8, name: &str, parent: Option<u64>) -> GuildChannel {
     serde_json::from_value(channel_json(id, kind, name, parent)).expect("channel fixture")
 }
@@ -178,6 +190,9 @@ pub struct FakeDiscordState {
     pub archived_threads: HashMap<u64, Vec<u64>>,
     /// Log of calls, e.g. "get_message 1/2".
     pub calls: Vec<String>,
+    /// Simulates the process dying: the message-page fetch after this many pages panics.
+    pub panic_after_pages: Option<usize>,
+    pub pages_fetched: usize,
 }
 
 #[derive(Default, Clone)]
@@ -207,6 +222,16 @@ impl FakeDiscord {
     }
     fn log(&self, s: String) {
         self.0.lock().unwrap().calls.push(s);
+    }
+    fn count_page(&self) {
+        let crash = {
+            let mut st = self.0.lock().unwrap();
+            st.pages_fetched += 1;
+            st.panic_after_pages.is_some_and(|n| st.pages_fetched > n)
+        };
+        if crash {
+            panic!("simulated crash during historical scan");
+        }
     }
 }
 
@@ -284,6 +309,7 @@ impl DiscordApi for FakeDiscord {
         before: Option<MessageId>,
     ) -> color_eyre::Result<Vec<Message>> {
         self.log(format!("messages_before {channel_id} {before:?}"));
+        self.count_page();
         let st = self.0.lock().unwrap();
         let mut v: Vec<Message> = st
             .messages
@@ -304,6 +330,7 @@ impl DiscordApi for FakeDiscord {
         after: MessageId,
     ) -> color_eyre::Result<Vec<Message>> {
         self.log(format!("messages_after {channel_id} {after}"));
+        self.count_page();
         let st = self.0.lock().unwrap();
         let mut v: Vec<Message> = st
             .messages
