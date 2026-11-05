@@ -1,75 +1,33 @@
-use std::env;
-
-use async_openai::{Client, config::OpenAIConfig};
 use color_eyre::eyre::WrapErr as _;
-use tracing_subscriber::layer::SubscriberExt as _;
-
-mod extractor;
+use fact_extractor::{config::Config, llm, worker::Worker};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    setup_tracing()?;
+    // .env first, so a RUST_LOG set there is honoured by the subscriber
+    let dotenv_problem = llm_worker_common::load_dotenv();
+    llm_worker_common::init_tracing(env!("CARGO_CRATE_NAME"))?;
+    if let Some(problem) = dotenv_problem {
+        tracing::warn!("{problem}");
+    }
 
-    // TODO check behavior
-    dotenvy::dotenv().ok();
-
-    let env_vars = get_env_vars()?;
-    tracing::debug!("loaded environment variables from .env");
+    // A previous run of this container may have left the readiness file:
+    // remove it first, so an invalid config never looks healthy.
+    llm_worker_common::clear_ready_file(&llm_worker_common::ready_file_from_env()).await;
+    // validated before anything else; never report readiness for a bad config
+    let config = Config::from_env()?;
+    tracing::debug!("loaded and validated configuration");
 
     let db_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
-        .connect(&env_vars.db_url)
+        .connect(&config.db_url)
         .await
         .wrap_err("failed to connect to DATABASE_URL")?;
     tracing::debug!("created database connection pool");
 
-    let llm_client_config = OpenAIConfig::new()
-        .with_api_base(&env_vars.llm_base_url)
-        .with_api_key(&env_vars.llm_api_key);
-    let llm_client = Client::with_config(llm_client_config);
+    let llm_client = llm::build_client(&config);
+    tracing::debug!(timeout = ?config.llm_timeout, "built LLM client");
 
-    tracing::debug!("built LLM client");
-
-    tokio::fs::write("/tmp/ready", "1").await?;
-    tracing::debug!("wrote readiness file to /tmp/ready");
-    extractor::run(
-        &db_pool,
-        &llm_client,
-        &env_vars.llm_model,
-        env_vars.dircord_server_name,
-    )
-    .await
-}
-
-fn setup_tracing() -> color_eyre::Result<()> {
-    let default_filter = format!("{}=trace", env!("CARGO_CRATE_NAME"));
-    let env_filter = tracing_subscriber::EnvFilter::try_new(
-        std::env::var("RUST_LOG").unwrap_or(default_filter),
-    )?;
-
-    let subscriber = tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(env_filter);
-
-    tracing::subscriber::set_global_default(subscriber)?;
-    Ok(())
-}
-
-struct EnvVars {
-    db_url: String,
-    llm_base_url: String,
-    llm_api_key: String,
-    llm_model: String,
-    dircord_server_name: String,
-}
-
-fn get_env_vars() -> color_eyre::Result<EnvVars> {
-    Ok(EnvVars {
-        db_url: env::var("DATABASE_URL")?,
-        llm_base_url: env::var("LLM_BASE_URL")?,
-        llm_api_key: env::var("LLM_API_KEY")?,
-        llm_model: env::var("LLM_MODEL")?,
-        dircord_server_name: env::var("DISCORD_SERVER_NAME")?,
-    })
+    llm_worker_common::write_ready_file(&config.ready_file).await?;
+    Worker::new(db_pool, llm_client, &config).run().await
 }
