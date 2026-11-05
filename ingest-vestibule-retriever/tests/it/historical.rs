@@ -75,6 +75,89 @@ async fn scan_includes_active_and_archived_public_threads() {
         5,
         "thread messages missing"
     );
+    // 3 archived threads, pages of 2: exactly two page requests, and none for the category.
+    let archived_calls: Vec<String> = h
+        .discord
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("archived_public_threads"))
+        .collect();
+    assert_eq!(archived_calls.len(), 2, "{archived_calls:?}");
+    assert!(
+        archived_calls
+            .iter()
+            .all(|c| c.contains(&CHANNEL.to_string()))
+    );
+}
+
+/// Media channels (type 16) have threads too; categories and voice channels do not.
+#[tokio::test]
+async fn scan_lists_archived_threads_only_for_thread_capable_channels() {
+    let d = FakeDiscord::new();
+    let media = 1_500_000_000_000_000_000u64;
+    let voice = media + 1;
+    d.add_channel(guild_channel(media, 16, "media", Some(CATEGORY)));
+    d.add_channel(guild_channel(voice, 2, "voice", Some(CATEGORY)));
+    d.0.lock().unwrap().guild_channels = vec![CATEGORY, media, voice];
+    let thread = media + 2;
+    d.add_channel(thread_channel(
+        thread,
+        media,
+        Some("2024-02-01T00:00:00.000000+00:00"),
+    ));
+    d.0.lock()
+        .unwrap()
+        .archived_threads
+        .insert(media, vec![thread]);
+    d.add_message(msg_in(31_000, thread));
+
+    let h = Harness::with(d, FakeFetcher::default()).await;
+    run_historical_scan(h.ctx.clone(), GuildId::new(GUILD))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.count("SELECT count(*) FROM messages WHERE message_id = 31000")
+            .await,
+        1
+    );
+    let listed: Vec<String> = h
+        .discord
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("archived_public_threads"))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![format!("archived_public_threads {media} None")]
+    );
+}
+
+/// The API may include the `after` message itself; it must not be processed twice and the
+/// cursor must still advance.
+#[tokio::test]
+async fn scan_pages_strictly_after_cursor() {
+    let d = FakeDiscord::new();
+    d.0.lock().unwrap().guild_channels = vec![CHANNEL];
+    for id in 1..=150u64 {
+        d.add_message(msg_in(50_000 + id, CHANNEL));
+    }
+    d.0.lock().unwrap().inclusive_after = true;
+    let h = Harness::with(d, FakeFetcher::default()).await;
+    run_historical_scan(h.ctx.clone(), GuildId::new(GUILD))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.count("SELECT count(*) FROM messages WHERE message_id > 50000")
+            .await,
+        150
+    );
+    let pages = h
+        .discord
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("messages_after"))
+        .count();
+    assert_eq!(pages, 3, "pages of 100, 50(+1 overlap), then empty");
 }
 
 /// Bug #11: every message of a channel was buffered before anything was written, so a crash

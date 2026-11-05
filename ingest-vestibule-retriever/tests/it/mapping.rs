@@ -248,3 +248,115 @@ fn serenity_image_hash_panics_on_non_ascii() {
         "serenity no longer panics on non-ASCII image hashes"
     );
 }
+
+/// Every system message kind gets synthetic content (from mutation testing: deleting any arm
+/// went unnoticed).
+#[test]
+fn every_system_kind_has_synthetic_content() {
+    use serenity::all::MessageType as T;
+    let with_author = [
+        (
+            T::GroupRecipientAddition,
+            "a added a recipient to the group",
+        ),
+        (
+            T::GroupRecipientRemoval,
+            "a removed a recipient from the group",
+        ),
+        (T::GroupCallCreation, "a started a call"),
+        (T::GroupNameUpdate, "a changed the group name"),
+        (T::GroupIconUpdate, "a changed the group icon"),
+        (T::PinsAdd, "a pinned a message"),
+        (T::MemberJoin, "user a joined the server"),
+        (T::NitroBoost, "a boosted the server"),
+        (T::NitroTier1, "the server reached Nitro Boost tier 1"),
+        (T::NitroTier2, "the server reached Nitro Boost tier 2"),
+        (T::NitroTier3, "the server reached Nitro Boost tier 3"),
+        (T::ChannelFollowAdd, "a followed a news channel"),
+        (
+            T::GuildDiscoveryDisqualified,
+            "the server was disqualified from Discovery",
+        ),
+        (
+            T::GuildDiscoveryRequalified,
+            "the server was requalified for Discovery",
+        ),
+        (
+            T::GuildDiscoveryGracePeriodInitialWarning,
+            "initial Discovery grace period warning",
+        ),
+        (
+            T::GuildDiscoveryGracePeriodFinalWarning,
+            "final Discovery grace period warning",
+        ),
+        (T::ThreadCreated, "a created a thread"),
+        (T::ThreadStarterMessage, "[thread starter message]"),
+        (T::GuildInviteReminder, "[guild invite reminder]"),
+        (T::AutoModAction, "[auto-moderation action]"),
+        (
+            T::RoleSubscriptionPurchase,
+            "a purchased a role subscription",
+        ),
+        (T::InteractionPremiumUpsell, "[interaction premium upsell]"),
+        (T::StageStart, "[stage started]"),
+        (T::StageEnd, "[stage ended]"),
+        (T::StageSpeaker, "a is now a stage speaker"),
+        (T::StageTopic, "[stage topic changed]"),
+        (
+            T::GuildApplicationPremiumSubscription,
+            "[application premium subscription]",
+        ),
+        (
+            T::GuildIncidentAlertModeEnabled,
+            "[incident alert mode enabled]",
+        ),
+        (
+            T::GuildIncidentAlertModeDisabled,
+            "[incident alert mode disabled]",
+        ),
+        (T::GuildIncidentReportRaid, "[incident report: raid]"),
+        (
+            T::GuildIncidentReportFalseAlarm,
+            "[incident report: false alarm]",
+        ),
+        (T::PurchaseNotification, "a made a purchase"),
+    ];
+    for (kind, expected) in with_author {
+        assert_eq!(
+            system_content_for(kind, "a").as_deref(),
+            Some(expected),
+            "{kind:?}"
+        );
+        assert!(is_system_kind(kind));
+    }
+    for kind in [
+        T::Regular,
+        T::InlineReply,
+        T::ChatInputCommand,
+        T::ContextMenuCommand,
+    ] {
+        assert_eq!(system_content_for(kind, "a"), None, "{kind:?}");
+    }
+}
+
+#[test]
+fn plausible_mime_requires_both_tokens() {
+    for bad in [
+        "/png",
+        "image/",
+        "ima ge/png",
+        "image/p ng",
+        "image/png\u{7f}",
+        "",
+    ] {
+        assert!(!is_plausible_mime(bad), "{bad:?}");
+    }
+    assert!(!is_plausible_mime(&format!("a/{}", "b".repeat(254))));
+    for good in [
+        "image/png",
+        "application/vnd.api+json",
+        "text/plain; charset=utf-8",
+    ] {
+        assert!(is_plausible_mime(good), "{good:?}");
+    }
+}

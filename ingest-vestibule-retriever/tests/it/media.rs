@@ -155,6 +155,7 @@ pub async fn local_server() -> String {
                 const HUGE: usize = 30 * 1024 * 1024;
                 let chunk = vec![b'x'; 1024 * 1024];
                 let _ = match path.as_str() {
+                    "/ok-chunked" => sock.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await,
                     "/ok" => sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello").await,
                     "/missing" => sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found").await,
                     "/huge" => {
@@ -256,4 +257,28 @@ fn media_limits_from_env_lookup() {
     assert_eq!(set.max_bytes, 1024);
     assert_eq!(set.timeout, std::time::Duration::from_secs(7));
     assert!(MediaLimits::from_lookup(|_| Some("lots".into())).is_err());
+}
+
+/// Size-limit boundaries (from mutation testing): a body of exactly `max_bytes` is accepted, one
+/// byte more is rejected, with and without Content-Length.
+#[tokio::test]
+async fn fetcher_limit_is_inclusive_with_and_without_content_length() {
+    use ingest_vestibule_retriever::media::MediaLimits;
+    let base = local_server().await;
+    let limits = |max_bytes| MediaLimits {
+        max_bytes,
+        ..MediaLimits::default()
+    };
+    let client = |max| {
+        HttpFetcher::from_builder(reqwest::Client::builder().no_proxy(), &limits(max)).unwrap()
+    };
+    for path in ["/ok", "/ok-chunked"] {
+        let url = format!("{base}{path}");
+        assert_eq!(
+            &client(5).fetch(&url).await.unwrap()[..],
+            b"hello",
+            "{path} at limit"
+        );
+        assert!(client(4).fetch(&url).await.is_err(), "{path} over limit");
+    }
 }
