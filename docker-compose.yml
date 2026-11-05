@@ -1,6 +1,17 @@
-# Sentience workers stack. Real deployment:
+# Sentience stack.
+#
+# Local / dev (no secrets, no .env needed):
+#   docker compose up -d --wait        # or: make up
+#   -> postgres (+unidb schema), rustfs + bucket, mock LLM, fact-extractor,
+#      topic-sorter and the dashboard on http://127.0.0.1:3000
+#   make seed                          # optional synthetic data
+#
+# Real deployment:
 #   cp .env.example .env   # fill in LLM_*, DISCORD_*, RustFS keys
 #   docker compose --profile app up -d
+#   (`app` adds the Discord ingester, which needs DISCORD_TOKEN; the
+#    `discord` profile is an alias. When LLM_BASE_URL is unset or empty the
+#    workers talk to the bundled mock LLM instead of a real provider.)
 #
 # Host ports are bound to 127.0.0.1 by default (the defaults below use
 # well-known dev credentials). Override with POSTGRES_PUBLISH / RUSTFS_CONSOLE_PUBLISH,
@@ -26,7 +37,12 @@ x-worker: &worker
         timeout: 3s
         retries: 5
         start_period: 60s
-    profiles: [app]
+
+x-llm-env: &llm-env
+    LLM_BASE_URL: ${LLM_BASE_URL:-http://mock-llm:8080/v1}
+    LLM_API_KEY: ${LLM_API_KEY:-mock}
+    LLM_MODEL: ${LLM_MODEL:-mock}
+    DISCORD_SERVER_NAME: ${DISCORD_SERVER_NAME:-Sentience Dev}
 
 x-worker-build: &worker-build
     context: .
@@ -117,10 +133,11 @@ services:
             - >
                 aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "${S3_BUCKET_NAME:-sentience}" 2>/dev/null || aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket "${S3_BUCKET_NAME:-sentience}"
         restart: "no"
-        profiles: [app]
 
     ingest-vestibule-retriever:
         <<: *worker
+        # Needs a real DISCORD_TOKEN / GUILD_ID, so it is opt-in.
+        profiles: [app, discord]
         build:
             <<: *worker-build
             target: ingest-vestibule-retriever
@@ -144,9 +161,12 @@ services:
             <<: *worker-build
             target: topic-sorter
         environment:
-            <<: *database-url
+            <<: [*database-url, *llm-env]
             RUST_LOG: ${RUST_LOG:-topic_sorter=debug}
-        depends_on: *postgres-dep
+        depends_on: &llm-worker-deps
+            <<: *postgres-dep
+            mock-llm:
+                condition: service_healthy
 
     # ─── Fact Extractor ────────────────────────────────────────────────
     fact-extractor:
@@ -155,9 +175,39 @@ services:
             <<: *worker-build
             target: fact-extractor
         environment:
-            <<: *database-url
+            <<: [*database-url, *llm-env]
             RUST_LOG: ${RUST_LOG:-fact_extractor=debug}
+        depends_on: *llm-worker-deps
+
+    # ─── Mock LLM (OpenAI-compatible, deterministic; dev/e2e only) ─────
+    # Used whenever LLM_BASE_URL is not set. Not published to the host.
+    mock-llm:
+        build: ./docker/mock-llm
+        networks: [sentience]
+        restart: unless-stopped
+        security_opt: ["no-new-privileges:true"]
+        environment:
+            MOCK_LLM_QUIET: ${MOCK_LLM_QUIET:-1}
+
+    # ─── Dashboard (Sentience-dash) ────────────────────────────────────
+    # Built straight from its git repo by default; DASH_CONTEXT=../Sentience-dash
+    # builds a local checkout instead.
+    dash:
+        build:
+            context: ${DASH_CONTEXT:-https://github.com/Creative-Difficulty/Sentience-dash.git#main}
+        ports: ["${DASH_PUBLISH:-127.0.0.1:3000}:3000"]
+        environment:
+            <<: *database-url
         depends_on: *postgres-dep
+        networks: [sentience]
+        restart: unless-stopped
+        security_opt: ["no-new-privileges:true"]
+        healthcheck:
+            test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/healthz || exit 1"]
+            interval: 10s
+            timeout: 3s
+            retries: 6
+            start_period: 15s
 
 networks:
     sentience:
