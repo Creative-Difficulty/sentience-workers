@@ -200,3 +200,51 @@ fn edit_content_ignores_system_messages_and_missing_content() {
     assert!(is_system_kind(MessageType::PinsAdd));
     assert!(!is_system_kind(MessageType::InlineReply));
 }
+
+/// Found by fuzzing (message_mapping): the attachment content type is uploader-controlled and was
+/// passed to S3 and `media_assets.content_type` verbatim, including "" and header-breaking values.
+#[test]
+fn attachment_content_type_is_sanitized() {
+    for (ct, expected) in [
+        (json!(""), "application/octet-stream"),
+        (json!("   "), "application/octet-stream"),
+        (
+            json!("text/html\r\nx-amz-meta-evil: 1"),
+            "application/octet-stream",
+        ),
+        (json!("image"), "application/octet-stream"),
+        (json!("image/png"), "image/png"),
+        (
+            json!("text/plain; charset=utf-8"),
+            "text/plain; charset=utf-8",
+        ),
+        (json!(null), "application/octet-stream"),
+    ] {
+        let mut v = message_json(1, CHANNEL, user_json(7, "u7"), "");
+        v["attachments"] = json!([{"id": "2", "filename": "f", "size": 1, "url": "https://cdn/f",
+            "proxy_url": "https://cdn/f", "content_type": ct}]);
+        let m = message(v);
+        assert_eq!(
+            attachment_spec(&m, &m.attachments[0]).content_type,
+            expected,
+            "input {ct}"
+        );
+    }
+}
+
+/// Known upstream bug (serenity 0.12.5 `ImageHash::from_str` slices by byte index): a 32-byte
+/// non-ASCII avatar hash panics during deserialization instead of erroring. Discord only sends
+/// hex hashes, so this is not reachable from real gateway traffic. When this starts failing,
+/// serenity fixed it and the filter in fuzz/fuzz_targets/raw_payloads.rs can go.
+#[test]
+fn serenity_image_hash_panics_on_non_ascii() {
+    let r = std::panic::catch_unwind(|| {
+        let _: Result<serenity::all::User, _> = serde_json::from_value(
+            json!({"id": "1", "username": "u", "discriminator": "0", "avatar": "012345678ǝbcdef0123456789abcdef"}),
+        );
+    });
+    assert!(
+        r.is_err(),
+        "serenity no longer panics on non-ASCII image hashes"
+    );
+}

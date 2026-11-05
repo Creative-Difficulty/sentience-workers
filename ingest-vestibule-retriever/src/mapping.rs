@@ -201,9 +201,28 @@ pub fn attachment_spec(msg: &Message, attachment: &Attachment) -> AssetSpec {
         object_key: attachment_object_key(msg, attachment),
         content_type: attachment
             .content_type
-            .clone()
-            .unwrap_or_else(|| "application/octet-stream".to_string()),
+            .as_deref()
+            .filter(|ct| is_plausible_mime(ct))
+            .unwrap_or("application/octet-stream")
+            .to_string(),
     }
+}
+
+/// Whether `ct` looks like `type/subtype[; params]` and is safe to use as an S3/HTTP
+/// `Content-Type` value. The attachment content type comes from the uploader, so empty or
+/// header-breaking values (CR/LF, control characters) must not reach S3 or the DB.
+pub fn is_plausible_mime(ct: &str) -> bool {
+    let token = |t: &str| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&b))
+    };
+    let essence = ct.split(';').next().unwrap_or("");
+    ct.len() <= 255
+        && ct.bytes().all(|b| (0x20..0x7f).contains(&b))
+        && essence
+            .split_once('/')
+            .is_some_and(|(t, sub)| token(t) && token(sub))
 }
 
 /// Returns `None` for sticker formats we cannot map to a file type.
