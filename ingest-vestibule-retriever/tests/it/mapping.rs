@@ -200,3 +200,163 @@ fn edit_content_ignores_system_messages_and_missing_content() {
     assert!(is_system_kind(MessageType::PinsAdd));
     assert!(!is_system_kind(MessageType::InlineReply));
 }
+
+/// Found by fuzzing (message_mapping): the attachment content type is uploader-controlled and was
+/// passed to S3 and `media_assets.content_type` verbatim, including "" and header-breaking values.
+#[test]
+fn attachment_content_type_is_sanitized() {
+    for (ct, expected) in [
+        (json!(""), "application/octet-stream"),
+        (json!("   "), "application/octet-stream"),
+        (
+            json!("text/html\r\nx-amz-meta-evil: 1"),
+            "application/octet-stream",
+        ),
+        (json!("image"), "application/octet-stream"),
+        (json!("image/png"), "image/png"),
+        (
+            json!("text/plain; charset=utf-8"),
+            "text/plain; charset=utf-8",
+        ),
+        (json!(null), "application/octet-stream"),
+    ] {
+        let mut v = message_json(1, CHANNEL, user_json(7, "u7"), "");
+        v["attachments"] = json!([{"id": "2", "filename": "f", "size": 1, "url": "https://cdn/f",
+            "proxy_url": "https://cdn/f", "content_type": ct}]);
+        let m = message(v);
+        assert_eq!(
+            attachment_spec(&m, &m.attachments[0]).content_type,
+            expected,
+            "input {ct}"
+        );
+    }
+}
+
+/// Known upstream bug (serenity 0.12.5 `ImageHash::from_str` slices by byte index): a 32-byte
+/// non-ASCII avatar hash panics during deserialization instead of erroring. Discord only sends
+/// hex hashes, so this is not reachable from real gateway traffic. When this starts failing,
+/// serenity fixed it and the filter in fuzz/fuzz_targets/raw_payloads.rs can go.
+#[test]
+fn serenity_image_hash_panics_on_non_ascii() {
+    let r = std::panic::catch_unwind(|| {
+        let _: Result<serenity::all::User, _> = serde_json::from_value(
+            json!({"id": "1", "username": "u", "discriminator": "0", "avatar": "012345678ǝbcdef0123456789abcdef"}),
+        );
+    });
+    assert!(
+        r.is_err(),
+        "serenity no longer panics on non-ASCII image hashes"
+    );
+}
+
+/// Every system message kind gets synthetic content (from mutation testing: deleting any arm
+/// went unnoticed).
+#[test]
+fn every_system_kind_has_synthetic_content() {
+    use serenity::all::MessageType as T;
+    let with_author = [
+        (
+            T::GroupRecipientAddition,
+            "a added a recipient to the group",
+        ),
+        (
+            T::GroupRecipientRemoval,
+            "a removed a recipient from the group",
+        ),
+        (T::GroupCallCreation, "a started a call"),
+        (T::GroupNameUpdate, "a changed the group name"),
+        (T::GroupIconUpdate, "a changed the group icon"),
+        (T::PinsAdd, "a pinned a message"),
+        (T::MemberJoin, "user a joined the server"),
+        (T::NitroBoost, "a boosted the server"),
+        (T::NitroTier1, "the server reached Nitro Boost tier 1"),
+        (T::NitroTier2, "the server reached Nitro Boost tier 2"),
+        (T::NitroTier3, "the server reached Nitro Boost tier 3"),
+        (T::ChannelFollowAdd, "a followed a news channel"),
+        (
+            T::GuildDiscoveryDisqualified,
+            "the server was disqualified from Discovery",
+        ),
+        (
+            T::GuildDiscoveryRequalified,
+            "the server was requalified for Discovery",
+        ),
+        (
+            T::GuildDiscoveryGracePeriodInitialWarning,
+            "initial Discovery grace period warning",
+        ),
+        (
+            T::GuildDiscoveryGracePeriodFinalWarning,
+            "final Discovery grace period warning",
+        ),
+        (T::ThreadCreated, "a created a thread"),
+        (T::ThreadStarterMessage, "[thread starter message]"),
+        (T::GuildInviteReminder, "[guild invite reminder]"),
+        (T::AutoModAction, "[auto-moderation action]"),
+        (
+            T::RoleSubscriptionPurchase,
+            "a purchased a role subscription",
+        ),
+        (T::InteractionPremiumUpsell, "[interaction premium upsell]"),
+        (T::StageStart, "[stage started]"),
+        (T::StageEnd, "[stage ended]"),
+        (T::StageSpeaker, "a is now a stage speaker"),
+        (T::StageTopic, "[stage topic changed]"),
+        (
+            T::GuildApplicationPremiumSubscription,
+            "[application premium subscription]",
+        ),
+        (
+            T::GuildIncidentAlertModeEnabled,
+            "[incident alert mode enabled]",
+        ),
+        (
+            T::GuildIncidentAlertModeDisabled,
+            "[incident alert mode disabled]",
+        ),
+        (T::GuildIncidentReportRaid, "[incident report: raid]"),
+        (
+            T::GuildIncidentReportFalseAlarm,
+            "[incident report: false alarm]",
+        ),
+        (T::PurchaseNotification, "a made a purchase"),
+    ];
+    for (kind, expected) in with_author {
+        assert_eq!(
+            system_content_for(kind, "a").as_deref(),
+            Some(expected),
+            "{kind:?}"
+        );
+        assert!(is_system_kind(kind));
+    }
+    for kind in [
+        T::Regular,
+        T::InlineReply,
+        T::ChatInputCommand,
+        T::ContextMenuCommand,
+    ] {
+        assert_eq!(system_content_for(kind, "a"), None, "{kind:?}");
+    }
+}
+
+#[test]
+fn plausible_mime_requires_both_tokens() {
+    for bad in [
+        "/png",
+        "image/",
+        "ima ge/png",
+        "image/p ng",
+        "image/png\u{7f}",
+        "",
+    ] {
+        assert!(!is_plausible_mime(bad), "{bad:?}");
+    }
+    assert!(!is_plausible_mime(&format!("a/{}", "b".repeat(254))));
+    for good in [
+        "image/png",
+        "application/vnd.api+json",
+        "text/plain; charset=utf-8",
+    ] {
+        assert!(is_plausible_mime(good), "{good:?}");
+    }
+}

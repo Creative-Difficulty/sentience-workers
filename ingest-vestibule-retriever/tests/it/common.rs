@@ -67,7 +67,7 @@ pub async fn fresh_db() -> PgPool {
         loop {
             // Other test binaries may be cloning the template at the same time.
             match sqlx::query(&format!(
-                "CREATE DATABASE \"{name}\" TEMPLATE \"{template}\""
+                "CREATE DATABASE \"{name}\" TEMPLATE \"{template}\" STRATEGY FILE_COPY"
             ))
             .execute(&mut admin)
             .await
@@ -193,6 +193,8 @@ pub struct FakeDiscordState {
     /// Simulates the process dying: the message-page fetch after this many pages panics.
     pub panic_after_pages: Option<usize>,
     pub pages_fetched: usize,
+    /// Make `messages_after` also return the `after` message itself.
+    pub inclusive_after: bool,
 }
 
 #[derive(Default, Clone)]
@@ -338,7 +340,7 @@ impl DiscordApi for FakeDiscord {
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|m| m.id > after)
+            .filter(|m| m.id > after || (st.inclusive_after && m.id == after))
             .collect();
         // Discord: the 100 messages right after `after`, returned newest-first.
         v.sort_by_key(|m| m.id);

@@ -1,0 +1,33 @@
+[package]
+name = "ingest-vestibule-retriever-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+arbitrary = { version = "1.5", features = ["derive"] }
+serde_json = "1"
+serenity = "0.12.5"
+ingest-vestibule-retriever = { path = ".." }
+
+# Own workspace so fuzz builds never touch the main workspace build.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "message_mapping"
+path = "fuzz_targets/message_mapping.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_payloads"
+path = "fuzz_targets/raw_payloads.rs"
+test = false
+doc = false
+bench = false
