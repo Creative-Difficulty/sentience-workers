@@ -1,0 +1,3 @@
+```json
+{"records":[{"kind":"skill","type":"instrument","value":"guitar","confidence":1.5,"reasoning":"","started_at":null,"ended_at":"2020-01-01T00:00:00Z","level":15.5,"is_current":false}]}
+```

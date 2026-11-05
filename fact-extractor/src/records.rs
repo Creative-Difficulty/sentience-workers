@@ -150,6 +150,9 @@ fn clean_text(s: &str) -> String {
 ///   before); `is_current` is kept as returned (the prompt asks for it)
 /// * an `ended_at` before `started_at`: when `started_at` was defaulted it is
 ///   moved to `ended_at` (a past point event), otherwise the two are swapped
+///
+/// `message_sent_at` is trusted (it comes from the database) and assumed to
+/// lie within years 1..=9999; it is the default for a missing start date.
 pub fn sanitize(record: &ExtractedRecord, message_sent_at: DateTime<Utc>) -> Option<CleanRecord> {
     let type_str = clean_text(&record.type_str);
     let value = clean_text(&record.value);
