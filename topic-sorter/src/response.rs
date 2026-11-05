@@ -204,3 +204,140 @@ mod tests {
         );
     }
 }
+
+/// Property-based tests: parsing is total, and planned assignments always
+/// satisfy the write invariants.
+#[cfg(test)]
+mod proptests {
+    use std::collections::{HashMap, HashSet};
+
+    use proptest::prelude::*;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn arb_json() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            any::<u64>().prop_map(Value::from),
+            (-1e300..1e300f64).prop_map(Value::from),
+            any::<String>().prop_map(Value::from),
+        ];
+        leaf.prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                prop::collection::btree_map(
+                    prop_oneof![
+                        Just("groups".to_string()),
+                        Just("topic".to_string()),
+                        Just("message_ids".to_string()),
+                        "[a-z]{1,8}",
+                    ],
+                    inner,
+                    0..6
+                )
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    fn topic() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => "[a-zA-Z ]{0,12}",
+            1 => any::<String>(),
+            1 => "[ \t\n\r\0\u{2028}]{0,4}",
+            1 => Just("Rust".to_string()),
+            1 => Just(" rust ".to_string()),
+        ]
+    }
+
+    fn groups() -> impl Strategy<Value = Vec<Group>> {
+        prop::collection::vec(
+            (topic(), prop::collection::vec(-3i64..30, 0..10))
+                .prop_map(|(topic, message_ids)| Group { topic, message_ids }),
+            0..8,
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+
+        #[test]
+        fn parse_never_panics_on_strings(raw in any::<String>()) {
+            let _ = parse_llm_response(&raw);
+        }
+
+        #[test]
+        fn parse_never_panics_on_json(v in arb_json()) {
+            let _ = parse_llm_response(&v.to_string());
+            let _ = parse_llm_response(&json!({ "groups": [v] }).to_string());
+        }
+
+        #[test]
+        fn parse_accounts_for_every_entry(entries in prop::collection::vec(arb_json(), 0..10)) {
+            let n = entries.len();
+            let p = parse_llm_response(&json!({ "groups": entries }).to_string()).unwrap();
+            prop_assert_eq!(p.groups.len() + p.malformed, n);
+        }
+
+        #[test]
+        fn valid_groups_round_trip(gs in groups()) {
+            let p = parse_llm_response(&json!({ "groups": gs }).to_string()).unwrap();
+            prop_assert_eq!(p.malformed, 0);
+            prop_assert_eq!(p.groups, gs);
+        }
+
+        #[test]
+        fn normalized_topics_are_canonical(raw in any::<String>()) {
+            if let Some(t) = normalize_topic(&raw) {
+                prop_assert!(!t.is_empty());
+                prop_assert!(t.chars().count() <= MAX_TOPIC_CHARS);
+                prop_assert!(!t.chars().any(char::is_control), "{:?}", t);
+                prop_assert_eq!(t.trim(), t.as_str());
+                prop_assert!(!t.contains("  "));
+                // idempotent: a stored name maps to itself
+                prop_assert_eq!(normalize_topic(&t), Some(t.clone()));
+            } else {
+                prop_assert!(raw.chars().all(|c| c.is_whitespace() || c.is_control()));
+            }
+        }
+
+        #[test]
+        fn assignments_satisfy_write_invariants(
+            gs in groups(),
+            valid in prop::collection::hash_set(0i64..25, 0..25),
+        ) {
+            let plan = plan_assignments(&gs, &valid);
+            let mut seen = HashSet::new();
+            let mut names = HashSet::new();
+            for a in &plan {
+                prop_assert!(!a.message_ids.is_empty(), "orphan topic {:?}", a.topic);
+                prop_assert_eq!(normalize_topic(&a.topic), Some(a.topic.clone()));
+                prop_assert!(names.insert(a.topic.clone()), "duplicate topic {:?}", a.topic);
+                for id in &a.message_ids {
+                    prop_assert!(valid.contains(id), "id {} not in the batch", id);
+                    prop_assert!(seen.insert(*id), "id {} assigned twice", id);
+                }
+            }
+            // completeness: every valid id listed under a usable name gets the
+            // topic of the first group that lists it
+            let mut expected: HashMap<i64, String> = HashMap::new();
+            for g in &gs {
+                if let Some(t) = normalize_topic(&g.topic) {
+                    for id in &g.message_ids {
+                        if valid.contains(id) {
+                            expected.entry(*id).or_insert_with(|| t.clone());
+                        }
+                    }
+                }
+            }
+            let actual: HashMap<i64, String> = plan
+                .iter()
+                .flat_map(|a| a.message_ids.iter().map(move |id| (*id, a.topic.clone())))
+                .collect();
+            prop_assert_eq!(actual, expected);
+        }
+    }
+}

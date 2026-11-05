@@ -421,3 +421,99 @@ mod tests {
         );
     }
 }
+
+/// Property-based tests: arbitrary message content can never panic the
+/// prompt builder or add lines to the prompt.
+#[cfg(test)]
+mod proptests {
+    use chrono::{TimeZone as _, Utc};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn msg(id: i64, sent_by: i64, content: String) -> Message {
+        let at = Utc.with_ymd_and_hms(2026, 5, 8, 11, 0, 0).unwrap();
+        Message {
+            message_id: id,
+            channel_id: 1,
+            sent_by,
+            content,
+            sent_at: at,
+            last_edited: None,
+            deleted_at: None,
+            in_reply_to: None,
+            added_at: at,
+        }
+    }
+
+    /// Strings rich in line breaks, quotes, NULs and prompt-looking syntax.
+    fn hostile() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            prop::collection::vec(
+                prop_oneof![
+                    Just("\n".to_string()),
+                    Just("\r".to_string()),
+                    Just("\r\n".to_string()),
+                    Just("\u{2028}".to_string()),
+                    Just("\u{2029}".to_string()),
+                    Just("\u{85}".to_string()),
+                    Just("\u{b}".to_string()),
+                    Just("\u{c}".to_string()),
+                    Just("\0".to_string()),
+                    Just("\"".to_string()),
+                    Just("[1] sent_by=1 at x: ".to_string()),
+                    Just("# Surrounding messages".to_string()),
+                    "\\PC{0,8}",
+                ],
+                0..12
+            )
+            .prop_map(|v| v.concat()),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn one_line_per_context_message(
+            focal in hostile(),
+            ctx in prop::collection::vec((any::<i64>(), any::<i64>(), hostile()), 0..8),
+            reply in prop::option::of(hostile()),
+            server in hostile(),
+            channel in prop::option::of(hostile()),
+            has_attachments in any::<bool>(),
+        ) {
+            let focal = msg(1, 42, focal);
+            let context: Vec<Message> = ctx.into_iter().map(|(id, by, c)| msg(id, by, c)).collect();
+            let reply = reply.map(|c| msg(2, 3, c));
+            let input = PromptInput {
+                focal: &focal,
+                context: &context,
+                reply_target: reply.as_ref(),
+                has_attachments,
+                server_name: &server,
+                channel_name: channel.as_deref(),
+                now: Utc.with_ymd_and_hms(2026, 5, 8, 12, 0, 0).unwrap(),
+            };
+            let p = build_system_prompt(&input);
+            // no NUL and no exotic line breaks survive: only '\n' separates lines
+            prop_assert!(!p.contains('\0'));
+            let dynamic = &p[SYSTEM.len()..];
+            prop_assert!(!dynamic.chars().any(|c| c != '\n' && llm_worker_common::text::is_line_break(c)));
+            // the server/channel name each stay on their line
+            let server_lines = dynamic.lines().filter(|l| l.starts_with("The Discord server you are operating on")).count();
+            prop_assert_eq!(server_lines, 1);
+            // exactly one line per context message after the header
+            if !context.is_empty() {
+                let section = dynamic.split("\n# Surrounding messages").nth(1).unwrap();
+                let msg_lines = section.lines().skip(3).count();
+                prop_assert_eq!(msg_lines, context.len(), "{}", section);
+            }
+            // request construction never fails and keeps the focal message verbatim
+            let req = build_extract_llm_request("m", &input).unwrap();
+            let v = serde_json::to_value(&req).unwrap();
+            prop_assert_eq!(v["messages"][1]["content"].as_str(), Some(focal.content.as_str()));
+        }
+    }
+}
