@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH inserted AS (\n               INSERT INTO topic (name)\n               SELECT $1\n               WHERE NOT EXISTS (SELECT 1 FROM topic WHERE name = $1)\n               RETURNING id\n           )\n           SELECT id AS \"id!\" FROM inserted\n           UNION ALL\n           SELECT id FROM topic WHERE name = $1\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5031f8b9c9d65ed2e0a97143bf622ceda775ad1c7564056a5f899870b866b052"
+}

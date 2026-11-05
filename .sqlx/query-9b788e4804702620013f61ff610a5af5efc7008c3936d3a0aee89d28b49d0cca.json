@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT * FROM discord_emojis WHERE discord_emoji_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_emoji_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "from_guild",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "emoji_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_animated",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "emoji_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "asset_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "9b788e4804702620013f61ff610a5af5efc7008c3936d3a0aee89d28b49d0cca"
+}

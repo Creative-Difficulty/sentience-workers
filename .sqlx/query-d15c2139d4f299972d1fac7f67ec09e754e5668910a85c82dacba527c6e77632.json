@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO fact_extraction_attempts (message_id)\n           SELECT m FROM UNNEST($1::bigint[]) AS m\n           ON CONFLICT (message_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d15c2139d4f299972d1fac7f67ec09e754e5668910a85c82dacba527c6e77632"
+}

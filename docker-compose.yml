@@ -1,7 +1,25 @@
+# Sentience workers stack. Real deployment:
+#   cp .env.example .env   # fill in LLM_*, DISCORD_*, RustFS keys
+#   docker compose --profile app up -d
+#
+# Host ports are bound to 127.0.0.1 by default (the defaults below use
+# well-known dev credentials). Override with POSTGRES_PUBLISH / RUSTFS_CONSOLE_PUBLISH,
+# e.g. POSTGRES_PUBLISH=0.0.0.0:5432 to expose Postgres on all interfaces.
+
 x-worker: &worker
-    env_file: .env
+    # .env is optional: compose must not fail on a fresh clone without one.
+    env_file:
+        - path: .env
+          required: false
     networks: [sentience]
     restart: unless-stopped
+    # Run an init as PID 1 so SIGTERM from `docker compose stop` reaches the
+    # service (a bare PID 1 without a handler ignores SIGTERM -> 10s SIGKILL).
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    # NOTE: the services write /tmp/ready right after start-up (before their
+    # first DB poll / Discord login succeed), so this only proves the process
+    # got that far, not that it is actually healthy.
     healthcheck:
         test: ["CMD", "test", "-f", "/tmp/ready"]
         interval: 10s
@@ -9,6 +27,13 @@ x-worker: &worker
         retries: 5
         start_period: 60s
     profiles: [app]
+
+x-worker-build: &worker-build
+    context: .
+    # Local unidb-schema checkout (with .git) to build the `unidb` git
+    # dependency from instead of github.com; see Dockerfile.
+    additional_contexts:
+        unidb: ${UNIDB_CONTEXT:-https://github.com/Vimothy-s-Vestibule/unidb-schema.git#a7a7c55458aef4f1bef899c4527af3559a925033}
 
 x-database-url: &database-url
     DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-sentience}
@@ -20,13 +45,12 @@ x-postgres-dep: &postgres-dep
 services:
     # ─── RustFS S3-compatible object storage ───────────────────────────
     rustfs:
-        image: rustfs/rustfs:latest
-        container_name: rustfs-s3
+        image: rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
         security_opt: ["no-new-privileges:true"]
         # S3 API (9000) is reachable in-network as rustfs:9000; only the
-        # admin console (9001) is published to the host.
+        # admin console (9001) is published to the host (loopback by default).
         ports:
-            - "9001:9001"
+            - "${RUSTFS_CONSOLE_PUBLISH:-127.0.0.1:9001}:9001"
         environment:
             RUSTFS_VOLUMES: /data/rustfs0
             RUSTFS_ADDRESS: 0.0.0.0:9000
@@ -36,7 +60,7 @@ services:
             RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
             RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-devadmin}
             RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-devadmin}
-            RUSTFS_OBS_LOGGER_LEVEL: debug
+            RUSTFS_OBS_LOGGER_LEVEL: ${RUSTFS_LOG_LEVEL:-info}
             RUSTFS_OBS_LOG_DIRECTORY: /logs
         volumes:
             - rustfs_data:/data
@@ -54,9 +78,13 @@ services:
         build:
             context: ./docker/postgres
             args:
-                UNIDB_REF: ${UNIDB_REF:-main}
-        container_name: sentience-postgres
-        ports: ["5432:5432"]
+                # unidb-schema commit baked into the image. Keep it equal to the
+                # `unidb` rev in Cargo.lock so the schema matches the compiled models.
+                UNIDB_REF: ${UNIDB_REF:-a7a7c55458aef4f1bef899c4527af3559a925033}
+            # Optional: UNIDB_CONTEXT=../unidb-schema builds from a local checkout.
+            additional_contexts:
+                unidb: ${UNIDB_CONTEXT:-https://github.com/Vimothy-s-Vestibule/unidb-schema.git#${UNIDB_REF:-a7a7c55458aef4f1bef899c4527af3559a925033}}
+        ports: ["${POSTGRES_PUBLISH:-127.0.0.1:5432}:5432"]
         environment:
             POSTGRES_USER: ${POSTGRES_USER:-postgres}
             POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -66,7 +94,8 @@ services:
         networks: [sentience]
         restart: unless-stopped
         healthcheck:
-            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+            # -d: the target DB must exist (initdb scripts done), not just the server.
+            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-sentience}"]
             interval: 10s
             timeout: 5s
             retries: 5
@@ -74,8 +103,7 @@ services:
 
     # ─── RustFS bucket bootstrap (one-shot) ────────────────────────────
     rustfs-bucket-init:
-        image: amazon/aws-cli:latest
-        container_name: rustfs-bucket-init
+        image: amazon/aws-cli:2.39.4@sha256:0aa3ae3c685574d7adc27fb19a0e1f192aa07b1487c16bd3ad03253b6de521ae
         depends_on:
             rustfs:
                 condition: service_healthy
@@ -88,22 +116,20 @@ services:
         command:
             - >
                 aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "${S3_BUCKET_NAME:-sentience}" 2>/dev/null || aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket "${S3_BUCKET_NAME:-sentience}"
-
-
         restart: "no"
         profiles: [app]
 
     ingest-vestibule-retriever:
         <<: *worker
-        container_name: ingest-vestibule-retriever
         build:
-            context: .
+            <<: *worker-build
             target: ingest-vestibule-retriever
         environment:
             <<: *database-url
             S3_URL: http://rustfs:9000/
             S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:-devadmin}
             S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:-devadmin}
+            S3_BUCKET_NAME: ${S3_BUCKET_NAME:-sentience}
             RUST_LOG: ${RUST_LOG:-ingest_vestibule_retriever=debug}
         depends_on:
             <<: *postgres-dep
@@ -114,9 +140,8 @@ services:
 
     topic-sorter:
         <<: *worker
-        container_name: topic-sorter
         build:
-            context: .
+            <<: *worker-build
             target: topic-sorter
         environment:
             <<: *database-url
@@ -126,9 +151,8 @@ services:
     # ─── Fact Extractor ────────────────────────────────────────────────
     fact-extractor:
         <<: *worker
-        container_name: fact-extractor
         build:
-            context: .
+            <<: *worker-build
             target: fact-extractor
         environment:
             <<: *database-url

@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.message_id, m.content, t.name AS \"topic?\"\n           FROM messages m\n           LEFT JOIN topic_message_relation tmr ON tmr.message_id = m.message_id\n           LEFT JOIN topic t ON t.id = tmr.topic_id\n           WHERE m.channel_id = $1 AND m.sent_at < $2 AND m.deleted_at IS NULL\n           ORDER BY m.sent_at DESC\n           LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "message_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "topic?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "612c09c05cfaa16e2c5d1bbe6a3f8ddde64dfcb9e7d4730937fcf33889503eba"
+}
