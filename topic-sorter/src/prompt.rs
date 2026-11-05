@@ -240,6 +240,19 @@ mod tests {
         assert_eq!(v["messages"][1]["content"], "usr");
         assert_eq!(v["response_format"]["json_schema"]["name"], "topic_groups");
         assert_eq!(v["response_format"]["json_schema"]["strict"], true);
+        let schema = &v["response_format"]["json_schema"]["schema"];
+        assert_eq!(schema["required"], serde_json::json!(["groups"]));
+        assert_eq!(schema["additionalProperties"], false);
+        let item = &schema["properties"]["groups"]["items"];
+        assert_eq!(
+            item["required"],
+            serde_json::json!(["topic", "message_ids"])
+        );
+        assert_eq!(
+            item["properties"]["message_ids"]["items"]["type"],
+            "integer"
+        );
+        assert_eq!(item["additionalProperties"], false);
     }
 }
 

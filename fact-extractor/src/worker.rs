@@ -57,6 +57,17 @@ enum Stored {
     AlreadyAttempted,
 }
 
+/// How long to wait before the next polling round: the back-off after a
+/// systemic failure, the idle sleep when the round made no progress (nothing
+/// fetched, or everything fetched failed and is cooling down), otherwise none.
+fn pause_after(outcome: &BatchOutcome) -> Option<Duration> {
+    match outcome.backoff {
+        Some(d) => Some(d),
+        None if outcome.fetched == 0 || outcome.attempted == 0 => Some(IDLE_SLEEP),
+        None => None,
+    }
+}
+
 pub struct Worker {
     pool: PgPool,
     client: Client<OpenAIConfig>,
@@ -91,11 +102,7 @@ impl Worker {
     pub async fn run(&self) -> color_eyre::Result<()> {
         loop {
             let pause = match self.process_batch().await {
-                Ok(outcome) => match outcome.backoff {
-                    Some(d) => Some(d),
-                    None if outcome.fetched == 0 || outcome.attempted == 0 => Some(IDLE_SLEEP),
-                    None => None,
-                },
+                Ok(outcome) => pause_after(&outcome),
                 Err(e) => {
                     let d = self.backoff.lock().unwrap().next_delay();
                     tracing::error!(error = %e, pause = ?d, "polling round failed");
@@ -381,4 +388,33 @@ async fn fetch_reply_target(
     .fetch_optional(pool)
     .await?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pacing() {
+        let o = |fetched, attempted, backoff| BatchOutcome {
+            fetched,
+            attempted,
+            backoff,
+            ..Default::default()
+        };
+        let b = Some(Duration::from_secs(40));
+        assert_eq!(pause_after(&o(0, 0, None)), Some(IDLE_SLEEP));
+        assert_eq!(pause_after(&o(3, 0, None)), Some(IDLE_SLEEP));
+        assert_eq!(pause_after(&o(3, 1, None)), None);
+        assert_eq!(pause_after(&o(3, 1, b)), b);
+        assert_eq!(pause_after(&o(0, 0, b)), b);
+    }
+
+    #[test]
+    fn delay_caps() {
+        assert_eq!(IDLE_SLEEP, Duration::from_secs(5));
+        assert_eq!(MAX_RETRY_DELAY, Duration::from_secs(15 * 60));
+        assert_eq!(BACKOFF_BASE, Duration::from_secs(5));
+        assert_eq!(BACKOFF_MAX, Duration::from_secs(5 * 60));
+    }
 }

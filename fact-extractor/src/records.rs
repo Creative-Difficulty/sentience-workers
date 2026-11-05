@@ -378,6 +378,12 @@ mod tests {
         let c = sanitize(&r, sent()).unwrap();
         assert_eq!((c.started_at, c.ended_at), (Some(day(3)), Some(day(3))));
 
+        // end after the message time: the start still defaults to the message time
+        let later = sent() + chrono::Duration::days(3);
+        r.ended_at = Some(later);
+        let c = sanitize(&r, sent()).unwrap();
+        assert_eq!((c.started_at, c.ended_at), (Some(sent()), Some(later)));
+
         r.started_at = Some(Utc.with_ymd_and_hms(-5000, 1, 1, 0, 0, 0).unwrap());
         r.ended_at = None;
         assert_eq!(sanitize(&r, sent()).unwrap().started_at, Some(sent()));
@@ -398,6 +404,63 @@ mod tests {
         assert_eq!(
             (c.started_at, c.ended_at, c.is_current),
             (None, None, Some(true))
+        );
+    }
+
+    /// The checker must reject every kind of violation it names (otherwise
+    /// the proptests and fuzz targets that rely on it prove nothing).
+    #[test]
+    fn invariant_checker_rejects_each_violation() {
+        let mut skill = rec(ActivityRecordType::Skill);
+        skill.level = Some(5.0);
+        let ok = sanitize(&skill, sent()).unwrap();
+        assert_eq!(ok.check_invariants(), Ok(()));
+        let bad = |f: &dyn Fn(&mut CleanRecord)| {
+            let mut c = ok.clone();
+            f(&mut c);
+            c.check_invariants()
+        };
+        assert!(bad(&|c| c.confidence = 1.01).is_err());
+        assert!(bad(&|c| c.confidence = -0.01).is_err());
+        assert!(bad(&|c| c.confidence = f32::NAN).is_err());
+        assert_eq!(bad(&|c| c.confidence = 1.0), Ok(()));
+        assert!(bad(&|c| c.type_str = " ".into()).is_err());
+        assert!(bad(&|c| c.value = "".into()).is_err());
+        assert!(bad(&|c| c.type_str = "a\0".into()).is_err());
+        assert!(bad(&|c| c.value = "a\0".into()).is_err());
+        assert!(bad(&|c| c.reasoning = "\0".into()).is_err());
+        assert!(bad(&|c| c.level = Some(11)).is_err());
+        assert!(bad(&|c| c.level = Some(-1)).is_err());
+        assert_eq!(bad(&|c| c.level = Some(10)), Ok(()));
+        assert_eq!(bad(&|c| c.level = Some(0)), Ok(()));
+        assert!(
+            bad(&|c| c.kind = ActivityRecordType::Fact).is_err(),
+            "level on a fact"
+        );
+        assert!(
+            bad(&|c| c.started_at = Some(Utc.with_ymd_and_hms(10000, 1, 1, 0, 0, 0).unwrap()))
+                .is_err()
+        );
+        assert!(
+            bad(&|c| c.ended_at = Some(Utc.with_ymd_and_hms(0, 12, 31, 0, 0, 0).unwrap())).is_err()
+        );
+        assert_eq!(
+            bad(&|c| c.started_at = Some(Utc.with_ymd_and_hms(9999, 12, 31, 0, 0, 0).unwrap())),
+            Ok(())
+        );
+        assert!(
+            bad(&|c| {
+                c.started_at = Some(day(10));
+                c.ended_at = Some(day(9));
+            })
+            .is_err()
+        );
+        assert_eq!(
+            bad(&|c| {
+                c.started_at = Some(day(10));
+                c.ended_at = Some(day(10));
+            }),
+            Ok(())
         );
     }
 
