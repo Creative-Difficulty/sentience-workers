@@ -2,7 +2,6 @@
 //! no Discord/HTTP types, so they can be integration tested against a real Postgres.
 
 use chrono::{DateTime, TimeZone, Utc};
-use ormlite::Model as _;
 use sqlx::{Connection as _, PgPool};
 use unidb::models::DiscordChannel;
 use uuid::Uuid;
@@ -16,8 +15,19 @@ pub const DELETED_USER_ID: i64 = 0;
 // channels
 // ---------------------------------------------------------------------------------------------
 
+/// Inserts a channel; an existing row (e.g. concurrent insert) is left as is.
 pub async fn insert_channel(pool: &PgPool, ch: &DiscordChannel) -> color_eyre::Result<()> {
-    ch.clone().insert(pool).await?;
+    sqlx::query!(
+        "INSERT INTO discord_channels (channel_id, name, channel_type, parent_channel_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING",
+        ch.channel_id,
+        ch.name,
+        ch.channel_type as _,
+        ch.parent_channel_id
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

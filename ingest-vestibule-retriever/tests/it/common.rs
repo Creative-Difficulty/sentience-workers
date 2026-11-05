@@ -20,19 +20,49 @@ use serenity::async_trait;
 use sqlx::{Connection, PgConnection, PgPool};
 
 static CREATE_DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SWEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Drops test databases left behind by test processes that are no longer running (per-test DBs
+/// are not dropped at the end of a test because pools may still be in use by spawned tasks).
+async fn sweep_stale_test_dbs(admin: &mut PgConnection) {
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'ivr\\_test\\_%'")
+            .fetch_all(&mut *admin)
+            .await
+            .unwrap_or_default();
+    for name in names {
+        let owner_alive = name
+            .strip_prefix("ivr_test_")
+            .and_then(|rest| rest.split_once('_'))
+            .and_then(|(pid, _)| pid.parse::<u32>().ok())
+            .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+        if !owner_alive {
+            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                .execute(&mut *admin)
+                .await;
+        }
+    }
+}
 
 /// Creates a fresh database from the template and returns a pool connected to it.
 pub async fn fresh_db() -> PgPool {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must point at a unidb DB");
     let (base, template) = url.rsplit_once('/').expect("DATABASE_URL has no db name");
     let template = template.split('?').next().unwrap().to_string();
-    let name = format!("ivr_test_{}", uuid::Uuid::new_v4().simple());
+    let name = format!(
+        "ivr_test_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    );
 
     {
         let _guard = CREATE_DB_LOCK.lock().await;
         let mut admin = PgConnection::connect(&format!("{base}/postgres"))
             .await
             .expect("connect admin");
+        if !SWEPT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            sweep_stale_test_dbs(&mut admin).await;
+        }
         let mut attempt = 0;
         loop {
             // Other test binaries may be cloning the template at the same time.

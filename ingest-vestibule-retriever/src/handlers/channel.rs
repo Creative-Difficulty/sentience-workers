@@ -46,12 +46,22 @@ pub async fn ensure_discord_channel(ctx: &AppCtx, channel_id: ChannelId) -> colo
         }
     }
 
-    // Insert from top (root parent) to bottom (the actual channel we want to insert)
+    // Insert from top (root parent) to bottom (the actual channel we want to insert). A parent that
+    // could not be fetched is not in the DB, so the child is stored without it rather than
+    // failing the FK (which used to be logged, cached as stored, and break every message in it).
     for ch in channels_to_insert.into_iter().rev() {
-        let row = channel_row(&ch);
-        if let Err(e) = db::insert_channel(&ctx.db_pool, &row).await {
-            tracing::error!("Failed to insert channel {}: {}", row.channel_id, e);
+        let mut row = channel_row(&ch);
+        if let Some(parent) = row.parent_channel_id
+            && !cache_contains(&ctx.channel_id_cache, parent)
+        {
+            tracing::warn!(
+                channel_id = row.channel_id,
+                parent,
+                "Parent channel unavailable, storing channel without parent"
+            );
+            row.parent_channel_id = None;
         }
+        db::insert_channel(&ctx.db_pool, &row).await?;
         cache_insert(&ctx.channel_id_cache, row.channel_id);
     }
 

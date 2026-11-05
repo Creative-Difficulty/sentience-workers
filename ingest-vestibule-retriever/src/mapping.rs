@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use serenity::all::{
-    Attachment, ChannelId, GuildChannel, GuildId, Message, MessageId, MessageType, ReactionType,
-    StickerFormatType, StickerItem, User,
+    Attachment, ChannelId, GuildChannel, GuildId, Message, MessageId, MessageReferenceKind,
+    MessageType, ReactionType, StickerFormatType, StickerItem, User,
 };
 use unidb::models::{DiscordChannel, enums::DiscordChannelType};
 
@@ -112,10 +112,22 @@ pub struct MessageRow {
 }
 
 /// The message this message replies to, as `(channel the parent lives in, parent id)`.
+///
+/// Uses the channel from the reference (a thread starter message references a message in the
+/// parent channel). Forwards (`type: 1`) and references into another guild (crossposts from a
+/// followed channel) are not replies: their target is not ingestible and must not become a
+/// `[deleted message]` placeholder.
 pub fn reply_parent(msg: &Message) -> Option<(ChannelId, MessageId)> {
     let r = msg.message_reference.as_ref()?;
-    let id = r.message_id?;
-    Some((msg.channel_id, id))
+    if !matches!(r.kind, MessageReferenceKind::Default) {
+        return None;
+    }
+    if let (Some(ref_guild), Some(msg_guild)) = (r.guild_id, msg.guild_id)
+        && ref_guild != msg_guild
+    {
+        return None;
+    }
+    Some((r.channel_id, r.message_id?))
 }
 
 pub fn message_row(msg: &Message) -> MessageRow {
