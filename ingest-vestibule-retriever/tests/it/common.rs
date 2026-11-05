@@ -67,7 +67,7 @@ pub async fn fresh_db() -> PgPool {
         loop {
             // Other test binaries may be cloning the template at the same time.
             match sqlx::query(&format!(
-                "CREATE DATABASE \"{name}\" TEMPLATE \"{template}\""
+                "CREATE DATABASE \"{name}\" TEMPLATE \"{template}\" STRATEGY FILE_COPY"
             ))
             .execute(&mut admin)
             .await
