@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::discord_api::SerenityDiscord;
+use crate::media::{MediaFetcher, ObjectStore};
 use crate::{AppCtx, IdCache};
 use serenity::{
     all::{Context, EventHandler, GuildId, Message, Reaction},
@@ -9,8 +11,8 @@ use sqlx::PgPool;
 
 pub struct DiscordEventHandler {
     pub db_pool: PgPool,
-    pub s3_client: aws_sdk_s3::Client,
-    pub s3_bucket: String,
+    pub fetcher: Arc<dyn MediaFetcher>,
+    pub store: Arc<dyn ObjectStore>,
     pub guild_id: GuildId,
     pub message_id_cache: IdCache,
     pub channel_id_cache: IdCache,
@@ -21,9 +23,9 @@ impl DiscordEventHandler {
     fn ctx(&self, discord_ctx: Context) -> AppCtx {
         AppCtx {
             db_pool: self.db_pool.clone(),
-            s3_client: self.s3_client.clone(),
-            s3_bucket: self.s3_bucket.clone(),
-            discord_ctx,
+            discord: Arc::new(SerenityDiscord(Arc::clone(&discord_ctx.http))),
+            fetcher: Arc::clone(&self.fetcher),
+            store: Arc::clone(&self.store),
             message_id_cache: Arc::clone(&self.message_id_cache),
             channel_id_cache: Arc::clone(&self.channel_id_cache),
             user_id_cache: Arc::clone(&self.user_id_cache),
@@ -56,56 +58,40 @@ impl EventHandler for DiscordEventHandler {
         let app_ctx = self.ctx(ctx);
 
         tokio::spawn(async move {
-            let span = tracing::info_span!("process_message_task", msg_id = msg.id.get());
-            let _enter = span.enter();
-
             tracing::debug!("started message processing task");
-
             if let Err(e) = crate::handlers::ensure_message(&app_ctx, &msg).await {
                 tracing::error!(error = %e, "Handler failed for message");
             }
-
             tracing::debug!("finished task");
         });
     }
 
-    #[tracing::instrument(skip_all, fields(msg_id=_event.id.get(), channel_id=_event.channel_id.get()))]
+    #[tracing::instrument(skip_all, fields(msg_id=event.id.get(), channel_id=event.channel_id.get()))]
     async fn message_update(
         &self,
         ctx: Context,
         _old_if_available: Option<Message>,
-        new_msg: Option<Message>,
-        _event: serenity::all::MessageUpdateEvent,
+        _new: Option<Message>,
+        event: serenity::all::MessageUpdateEvent,
     ) {
-        let Some(msg) = new_msg else {
-            return;
-        };
-
-        if msg.guild_id != Some(self.guild_id) {
+        // `_new` is only `Some` for messages in serenity's cache, which by default holds none,
+        // so the event payload is used instead.
+        if event.guild_id != Some(self.guild_id) {
             return;
         }
 
         let app_ctx = self.ctx(ctx);
 
         tokio::spawn(async move {
-            if let Err(e) = crate::handlers::handle_message_edit(&app_ctx, &msg).await {
-                tracing::error!(error = %e, "Failed to process message edit handler");
-            } else {
-                tracing::debug!("Successfully logged message edit");
+            match crate::handlers::handle_message_update(&app_ctx, &event).await {
+                Ok(outcome) => tracing::debug!(?outcome, "Processed message update"),
+                Err(e) => tracing::error!(error = %e, "Failed to process message update"),
             }
         });
     }
 
-    // TODO still add channel id here even though we have to retrieve the channel manually and go through a result, for reaction remove too
     #[tracing::instrument(skip_all, fields(msg_id=add_reaction.message_id.get()))]
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        let span = tracing::info_span!(
-            "reaction_add_handler",
-            msg_id = add_reaction.message_id.get()
-        );
-        let _enter = span.enter();
-        tracing::debug!("starting reaction add handler");
-
         if add_reaction.guild_id != Some(self.guild_id) {
             return;
         }
@@ -123,13 +109,6 @@ impl EventHandler for DiscordEventHandler {
 
     #[tracing::instrument(skip_all, fields(msg_id=remove_reaction.message_id.get()))]
     async fn reaction_remove(&self, ctx: Context, remove_reaction: Reaction) {
-        let span = tracing::info_span!(
-            "reaction_remove_handler",
-            msg_id = remove_reaction.message_id.get()
-        );
-        let _enter = span.enter();
-        tracing::debug!("starting reaction remove handler");
-
         if remove_reaction.guild_id != Some(self.guild_id) {
             return;
         }

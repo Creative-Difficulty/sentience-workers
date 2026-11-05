@@ -1,46 +1,60 @@
 use crate::AppCtx;
-use ormlite::Model as _;
-use serenity::all::Message;
-use unidb::models::MessageEdit;
-use uuid::Uuid;
+use crate::db::{self, EditOutcome};
+use crate::mapping::{edit_content, snowflake};
+use serenity::all::{Message, MessageUpdateEvent};
 
+/// Records an edit given the full, current message.
+///
+/// The message is ingested first if it is unknown (its current content becomes the baseline; the
+/// pre-edit content is not knowable). Then the stored content is compared with the new one, so
+/// embed-only updates and duplicate events do not create edit rows.
 #[tracing::instrument(skip_all, fields(msg_id=msg.id.get()))]
-pub async fn handle_message_edit(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<()> {
+pub async fn handle_message_edit(ctx: &AppCtx, msg: &Message) -> color_eyre::Result<EditOutcome> {
     crate::handlers::ensure_message(ctx, msg).await?;
 
-    if let Some(edited_at) = msg.edited_timestamp {
-        let old_content = sqlx::query_scalar!(
-            "SELECT content FROM messages WHERE message_id = $1",
-            msg.id.get() as i64
-        )
-        .fetch_optional(&ctx.db_pool)
-        .await?
-        .ok_or_else(|| {
-            color_eyre::eyre::eyre!(
-                "Message (id={}) that was supposedly edited does not exist in database",
-                msg.id.get()
-            )
-        })?;
+    let (Some(edited_at), Some(new_content)) = (
+        msg.edited_timestamp,
+        edit_content(Some(msg.kind), Some(&msg.content)),
+    ) else {
+        return Ok(EditOutcome::Unchanged);
+    };
+    db::record_edit(
+        &ctx.db_pool,
+        snowflake(msg.id.get()),
+        &new_content,
+        *edited_at,
+    )
+    .await
+}
 
-        let edit = MessageEdit {
-            id: Uuid::new_v4(),
-            message_id: msg.id.get() as i64,
-            old_content,
-            edited_at: *edited_at,
-        };
+/// Records an edit from a gateway `MESSAGE_UPDATE` event.
+///
+/// serenity only passes the full new message to `message_update` when the message is in its
+/// cache, and the default cache keeps no messages, so the event itself must be used.
+#[tracing::instrument(skip_all, fields(msg_id=event.id.get()))]
+pub async fn handle_message_update(
+    ctx: &AppCtx,
+    event: &MessageUpdateEvent,
+) -> color_eyre::Result<EditOutcome> {
+    let (Some(edited_at), Some(new_content)) = (
+        event.edited_timestamp,
+        edit_content(event.kind, event.content.as_deref()),
+    ) else {
+        return Ok(EditOutcome::Unchanged);
+    };
 
-        edit.insert(&ctx.db_pool).await?;
-
-        // Also update the messages table row to the current state
-        sqlx::query!(
-            "UPDATE messages SET content = $1, last_edited = $2 WHERE message_id = $3",
-            msg.content,
-            *edited_at,
-            msg.id.get() as i64
-        )
-        .execute(&ctx.db_pool)
-        .await?;
+    match db::record_edit(
+        &ctx.db_pool,
+        snowflake(event.id.get()),
+        &new_content,
+        *edited_at,
+    )
+    .await?
+    {
+        EditOutcome::NotFound => match ctx.discord.get_message(event.channel_id, event.id).await? {
+            Some(msg) => handle_message_edit(ctx, &msg).await,
+            None => Ok(EditOutcome::NotFound),
+        },
+        outcome => Ok(outcome),
     }
-
-    Ok(())
 }

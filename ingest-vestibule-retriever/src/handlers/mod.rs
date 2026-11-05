@@ -9,5 +9,5 @@ pub mod reaction;
 pub use channel::ensure_discord_channel;
 pub use discord_user::ensure_user;
 pub use message::ensure_message;
-pub use message_edit::handle_message_edit;
+pub use message_edit::{handle_message_edit, handle_message_update};
 pub use reaction::{handle_reaction_add, handle_reaction_remove};
