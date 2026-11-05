@@ -532,6 +532,8 @@ async fn ready_file_written_only_after_successful_startup() {
         db.url,
         llm.uri()
     );
+    // stale file left by a previous run of the same container
+    std::fs::write(&ready, "1").unwrap();
     let mut p = spawn_binary(&dotenv, &[("READY_FILE", &ready_s)]);
     let exited = wait_for(
         || matches!(p.child.try_wait(), Ok(Some(_))),

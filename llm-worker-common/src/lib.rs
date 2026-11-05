@@ -48,6 +48,19 @@ pub fn load_dotenv() -> Option<String> {
     }
 }
 
+/// Default readiness file (`READY_FILE`).
+pub const DEFAULT_READY_FILE: &str = "/tmp/ready";
+
+/// `READY_FILE` from the process environment (default [`DEFAULT_READY_FILE`]).
+///
+/// Read on its own, before the configuration is validated, so that a stale
+/// file from a previous run can be removed even when the new configuration
+/// is invalid and the process is about to exit.
+pub fn ready_file_from_env() -> std::path::PathBuf {
+    let get = |k: &str| std::env::var(k).ok();
+    env::Env::new(&get).path_or("READY_FILE", DEFAULT_READY_FILE)
+}
+
 /// Remove a readiness file left over from a previous run of this container.
 pub async fn clear_ready_file(path: &Path) {
     match tokio::fs::remove_file(path).await {

@@ -632,7 +632,9 @@ async fn ready_file_written_only_after_successful_startup() {
         )
     };
 
-    // invalid LLM_BASE_URL: must exit with an error and never become ready
+    // invalid LLM_BASE_URL: must exit with an error and never become ready,
+    // even with a stale file left by a previous run of the same container
+    std::fs::write(&ready, "1").unwrap();
     let mut p = spawn_binary(&base("not-a-url"), &[("READY_FILE", &ready_s)]);
     let exited = wait_for(
         || matches!(p.child.try_wait(), Ok(Some(_))),

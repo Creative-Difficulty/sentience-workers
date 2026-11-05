@@ -3,14 +3,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use llm_worker_common::env::Env;
+use llm_worker_common::{DEFAULT_READY_FILE, env::Env};
 
 const DEFAULT_BATCH_SIZE: i64 = 50;
 const DEFAULT_LLM_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 const DEFAULT_RETRY_BASE_DELAY_SECS: u64 = 30;
 const DEFAULT_MAX_PROMPT_TOPICS: i64 = 200;
-const DEFAULT_READY_FILE: &str = "/tmp/ready";
 
 #[derive(Debug, Clone)]
 pub struct Config {

@@ -11,9 +11,11 @@ async fn main() -> color_eyre::Result<()> {
         tracing::warn!("{problem}");
     }
 
+    // A previous run of this container may have left the readiness file:
+    // remove it first, so an invalid config never looks healthy.
+    llm_worker_common::clear_ready_file(&llm_worker_common::ready_file_from_env()).await;
     // validated before anything else; never report readiness for a bad config
     let config = Config::from_env()?;
-    llm_worker_common::clear_ready_file(&config.ready_file).await;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
