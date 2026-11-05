@@ -696,16 +696,67 @@ async fn rust_log_from_dotenv_is_honoured() {
         llm.uri(),
         ready.display()
     );
+    // one message, so the worker logs an INFO line ("processing batch")
+    db.seed_message(SeedMessage::new(
+        1,
+        CHANNEL,
+        AUTHOR,
+        "I live in Vienna",
+        t(0),
+    ))
+    .await;
+    Mock::given(method("POST"))
+        .respond_with(llm_reply(vec![]))
+        .mount(&llm)
+        .await;
     let mut p = spawn_binary(&dotenv, &[]);
     // give it time to start up and log its start-up debug lines
     wait_for(|| ready.exists(), Duration::from_secs(10));
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(1500));
     let _ = p.child.kill();
     let out = p.child.wait_with_output_ref();
     let _ = std::fs::remove_file(&ready);
     assert!(
         !out.contains("DEBUG"),
         "RUST_LOG=fact_extractor=info from .env ignored; output:\n{out}"
+    );
+    // ... while INFO still gets through (tracing is actually installed)
+    assert!(
+        out.contains("INFO") && out.contains("processing batch"),
+        "no INFO output; output:\n{out}"
+    );
+}
+
+/// A `.env` that cannot be parsed is reported (not silently ignored); the
+/// process environment still configures the worker.
+#[tokio::test]
+async fn unparsable_dotenv_is_reported() {
+    let Some((db, llm)) = setup().await else {
+        return;
+    };
+    let ready = std::env::temp_dir().join(format!("fe-ready-{}", uuid_like()));
+    let ready_s = ready.display().to_string();
+    let uri = llm.uri();
+    let mut p = spawn_binary(
+        "RUST_LOG=fact_extractor=info\n\"unterminated quote\n",
+        &[
+            ("DATABASE_URL", db.url.as_str()),
+            ("LLM_BASE_URL", uri.as_str()),
+            ("LLM_API_KEY", "k"),
+            ("LLM_MODEL", "m"),
+            ("DISCORD_SERVER_NAME", "s"),
+            ("READY_FILE", ready_s.as_str()),
+            ("RUST_LOG", "fact_extractor=info"),
+        ],
+    );
+    let became_ready = wait_for(|| ready.exists(), Duration::from_secs(10));
+    let _ = p.child.kill();
+    let out = p.child.wait_with_output_ref();
+    let _ = std::fs::remove_file(&ready);
+    assert!(became_ready, "worker did not start; output:\n{out}");
+    assert!(
+        out.contains("WARN") && out.contains("failed to load .env"),
+        "unparsable .env not reported; output:\n{out}"
     );
 }
 

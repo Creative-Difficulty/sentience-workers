@@ -662,6 +662,11 @@ async fn rust_log_from_dotenv_is_honoured() {
         !out.contains("DEBUG"),
         "RUST_LOG=topic_sorter=info from .env ignored; output:\n{out}"
     );
+    // ... while INFO still gets through (tracing is actually installed)
+    assert!(
+        out.contains("INFO") && out.contains("processing batch"),
+        "no INFO output; output:\n{out}"
+    );
 }
 
 fn attempted_blocking(url: &str) -> bool {
