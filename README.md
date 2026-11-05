@@ -29,7 +29,6 @@ Then run `docker compose --profile app up -d` (`-d` for `detached`, running in t
 - The postgres image bakes in unidb-schema at a pinned commit (`UNIDB_REF`, default: the `unidb` rev in `Cargo.lock`), so the database schema matches the compiled models. Keep the two in sync. To build schema and the `unidb` crate from a local checkout instead of GitHub (offline builds, schema development), set `UNIDB_CONTEXT=../unidb-schema` (the checkout must contain `.git` and the pinned commit). The schema is only applied when the `pg_data` volume is first initialised.
 - Base images are pinned by version and digest, the workers run as an unprivileged user (uid 10001), and Postgres / the RustFS console are published on `127.0.0.1` only (override with `POSTGRES_PUBLISH` / `RUSTFS_CONSOLE_PUBLISH`).
 - `.env` is optional for `docker compose config`/`build`; the workers still need the variables from `.env.example` at runtime.
-- Behind a TLS-intercepting proxy, pass its CA bundle as a BuildKit secret: `docker build --secret id=build_ca,src=/path/ca.pem ...` (never stored in an image layer).
 
 ### Non-Docker Installation/Deployment
 

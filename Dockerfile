@@ -6,11 +6,7 @@
 # committed .sqlx/ offline cache (regenerate with `cargo sqlx prepare --workspace`
 # whenever a query or the pinned unidb rev changes).
 #
-# Optional build inputs (none of them are required, none end up in an image layer):
-#   --secret id=build_ca,src=/path/ca-bundle.pem
-#       PEM bundle to trust for HTTPS while fetching crates (for builds behind a
-#       TLS-intercepting corporate proxy). Mounted only for the RUN steps that
-#       need the network; never written to a layer.
+# Optional build input (not required, never ends up in an image layer):
 #   --build-context unidb=/path/to/unidb-schema
 #       A local git checkout of unidb-schema (must contain .git and the commit
 #       pinned in Cargo.lock). When given, cargo fetches the `unidb` git
@@ -29,14 +25,10 @@ ARG CARGO_CHEF_VERSION=0.1.78
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pkg-config libssl-dev git \
     && rm -rf /var/lib/apt/lists/*
-# Wrapper that applies the optional build inputs described above, then execs.
+# Wrapper that applies the optional `unidb` build context described above, then execs.
 COPY --chmod=0755 <<'EOF' /usr/local/bin/build-env
 #!/bin/sh
 set -eu
-ca=/run/secrets/build_ca
-if [ -s "$ca" ] && grep -q 'BEGIN CERTIFICATE' "$ca"; then
-    export CARGO_HTTP_CAINFO="$ca" SSL_CERT_FILE="$ca" GIT_SSL_CAINFO="$ca"
-fi
 if [ -d /unidb/.git ]; then
     export CARGO_NET_GIT_FETCH_WITH_CLI=true \
         GIT_CONFIG_COUNT=2 \
@@ -47,8 +39,7 @@ if [ -d /unidb/.git ]; then
 fi
 exec "$@"
 EOF
-RUN --mount=type=secret,id=build_ca \
-    build-env cargo install cargo-chef --locked --version "${CARGO_CHEF_VERSION}"
+RUN cargo install cargo-chef --locked --version "${CARGO_CHEF_VERSION}"
 WORKDIR /app
 
 FROM chef AS planner
@@ -57,14 +48,12 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-RUN --mount=type=secret,id=build_ca \
-    --mount=type=bind,from=unidb,target=/unidb \
+RUN --mount=type=bind,from=unidb,target=/unidb \
     build-env cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
 # Compile sqlx macros against .sqlx/ instead of a live DATABASE_URL.
 ENV SQLX_OFFLINE=true
-RUN --mount=type=secret,id=build_ca \
-    --mount=type=bind,from=unidb,target=/unidb \
+RUN --mount=type=bind,from=unidb,target=/unidb \
     build-env cargo build --release --locked --workspace --bins \
     && mkdir -p /out \
     && for bin in fact-extractor topic-sorter ingest-vestibule-retriever; do \
