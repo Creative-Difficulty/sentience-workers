@@ -185,15 +185,67 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct FakeDbError(Option<&'static str>);
+
+    impl std::fmt::Display for FakeDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake db error {:?}", self.0)
+        }
+    }
+
+    impl std::error::Error for FakeDbError {}
+
+    impl sqlx::error::DatabaseError for FakeDbError {
+        fn message(&self) -> &str {
+            "fake"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            self.0.map(std::borrow::Cow::Borrowed)
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    fn db(code: Option<&'static str>) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(FakeDbError(code)))
+    }
+
     #[test]
     fn sqlx_errors() {
-        assert_eq!(
-            classify_sqlx(&sqlx::Error::PoolTimedOut),
-            FailureKind::Systemic
-        );
-        assert_eq!(
-            classify_sqlx(&sqlx::Error::RowNotFound),
-            FailureKind::Message
-        );
+        use FailureKind::*;
+        assert_eq!(classify_sqlx(&sqlx::Error::PoolTimedOut), Systemic);
+        assert_eq!(classify_sqlx(&sqlx::Error::RowNotFound), Message);
+        // 22021: invalid byte sequence (NUL in text); 22008: datetime out of range
+        assert_eq!(classify_sqlx(&db(Some("22021"))), Message);
+        assert_eq!(classify_sqlx(&db(Some("22008"))), Message);
+        // 23505: unique violation; 23503: FK violation
+        assert_eq!(classify_sqlx(&db(Some("23505"))), Message);
+        assert_eq!(classify_sqlx(&db(Some("23503"))), Message);
+        // 40001: serialization failure; 57P01: admin shutdown; 53300: too many connections
+        assert_eq!(classify_sqlx(&db(Some("40001"))), Systemic);
+        assert_eq!(classify_sqlx(&db(Some("57P01"))), Systemic);
+        assert_eq!(classify_sqlx(&db(Some("53300"))), Systemic);
+        assert_eq!(classify_sqlx(&db(Some("2"))), Systemic);
+        assert_eq!(classify_sqlx(&db(None)), Systemic);
+        assert_eq!(Failure::from(db(Some("22021"))).kind, Message);
+    }
+
+    #[test]
+    fn display_names_kind_and_error() {
+        let f = Failure::systemic(color_eyre::eyre::eyre!("provider down"));
+        assert_eq!(f.to_string(), "Systemic failure: provider down");
+        let f = Failure::message(color_eyre::eyre::eyre!("bad json"));
+        assert_eq!(f.to_string(), "Message failure: bad json");
     }
 }

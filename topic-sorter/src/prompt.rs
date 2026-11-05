@@ -240,5 +240,91 @@ mod tests {
         assert_eq!(v["messages"][1]["content"], "usr");
         assert_eq!(v["response_format"]["json_schema"]["name"], "topic_groups");
         assert_eq!(v["response_format"]["json_schema"]["strict"], true);
+        let schema = &v["response_format"]["json_schema"]["schema"];
+        assert_eq!(schema["required"], serde_json::json!(["groups"]));
+        assert_eq!(schema["additionalProperties"], false);
+        let item = &schema["properties"]["groups"]["items"];
+        assert_eq!(
+            item["required"],
+            serde_json::json!(["topic", "message_ids"])
+        );
+        assert_eq!(
+            item["properties"]["message_ids"]["items"]["type"],
+            "integer"
+        );
+        assert_eq!(item["additionalProperties"], false);
+    }
+}
+
+/// Property-based tests: arbitrary content never panics or forges lines.
+#[cfg(test)]
+mod proptests {
+    use chrono::{TimeZone as _, Utc};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn msg(id: i64, content: String) -> Message {
+        let at = Utc.with_ymd_and_hms(2026, 5, 8, 11, 0, 0).unwrap();
+        Message {
+            message_id: id,
+            channel_id: 1,
+            sent_by: 2,
+            content,
+            sent_at: at,
+            last_edited: None,
+            deleted_at: None,
+            in_reply_to: None,
+            added_at: at,
+        }
+    }
+
+    fn hostile() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            "([\n\r\u{2028}\u{2029}\u{85}\u{b}\u{c}\0]|\\[1\\]: |\\PC){0,40}",
+            "x{990,1010}",
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1000))]
+
+        #[test]
+        fn user_prompt_has_one_line_per_message(contents in prop::collection::vec(hostile(), 0..10)) {
+            let msgs: Vec<Message> = contents.into_iter().enumerate().map(|(i, c)| msg(i as i64, c)).collect();
+            let user = build_user_prompt(&msgs);
+            let lines: Vec<&str> = user.lines().collect();
+            prop_assert_eq!(lines.len(), msgs.len() + 1);
+            for (line, m) in lines[1..].iter().zip(&msgs) {
+                let prefix = format!("[{}]: ", m.message_id);
+                prop_assert!(line.starts_with(&prefix));
+                prop_assert!(line.chars().count() <= prefix.len() + MAX_PROMPT_MESSAGE_CHARS + 1);
+            }
+            prop_assert!(!user.contains('\0') && !user.contains('\r'));
+        }
+
+        #[test]
+        fn system_prompt_has_one_line_per_entry(
+            topics in prop::collection::vec(hostile(), 0..6),
+            ctx in prop::collection::vec((any::<i64>(), hostile(), prop::option::of(hostile())), 0..6),
+        ) {
+            let context: Vec<ContextMessage> = ctx
+                .into_iter()
+                .map(|(message_id, content, topic)| ContextMessage { message_id, content, topic })
+                .collect();
+            let sys = build_system_prompt(&topics, &context);
+            let dynamic = &sys[SYSTEM.len()..];
+            let topic_lines = dynamic.lines().filter(|l| l.starts_with("- ")).count();
+            prop_assert_eq!(topic_lines, topics.len());
+            let ctx_lines = dynamic
+                .split("Earlier messages for context:\n")
+                .nth(1)
+                .map(|s| s.lines().filter(|l| !l.is_empty()).count())
+                .unwrap_or(0);
+            prop_assert_eq!(ctx_lines, context.len());
+            prop_assert!(!dynamic.chars().any(|c| c != '\n' && llm_worker_common::text::is_line_break(c)));
+            let _ = build_request("m", sys.clone(), "u").unwrap();
+        }
     }
 }

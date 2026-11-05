@@ -150,6 +150,9 @@ fn clean_text(s: &str) -> String {
 ///   before); `is_current` is kept as returned (the prompt asks for it)
 /// * an `ended_at` before `started_at`: when `started_at` was defaulted it is
 ///   moved to `ended_at` (a past point event), otherwise the two are swapped
+///
+/// `message_sent_at` is trusted (it comes from the database) and assumed to
+/// lie within years 1..=9999; it is the default for a missing start date.
 pub fn sanitize(record: &ExtractedRecord, message_sent_at: DateTime<Utc>) -> Option<CleanRecord> {
     let type_str = clean_text(&record.type_str);
     let value = clean_text(&record.value);
@@ -375,6 +378,12 @@ mod tests {
         let c = sanitize(&r, sent()).unwrap();
         assert_eq!((c.started_at, c.ended_at), (Some(day(3)), Some(day(3))));
 
+        // end after the message time: the start still defaults to the message time
+        let later = sent() + chrono::Duration::days(3);
+        r.ended_at = Some(later);
+        let c = sanitize(&r, sent()).unwrap();
+        assert_eq!((c.started_at, c.ended_at), (Some(sent()), Some(later)));
+
         r.started_at = Some(Utc.with_ymd_and_hms(-5000, 1, 1, 0, 0, 0).unwrap());
         r.ended_at = None;
         assert_eq!(sanitize(&r, sent()).unwrap().started_at, Some(sent()));
@@ -398,6 +407,63 @@ mod tests {
         );
     }
 
+    /// The checker must reject every kind of violation it names (otherwise
+    /// the proptests and fuzz targets that rely on it prove nothing).
+    #[test]
+    fn invariant_checker_rejects_each_violation() {
+        let mut skill = rec(ActivityRecordType::Skill);
+        skill.level = Some(5.0);
+        let ok = sanitize(&skill, sent()).unwrap();
+        assert_eq!(ok.check_invariants(), Ok(()));
+        let bad = |f: &dyn Fn(&mut CleanRecord)| {
+            let mut c = ok.clone();
+            f(&mut c);
+            c.check_invariants()
+        };
+        assert!(bad(&|c| c.confidence = 1.01).is_err());
+        assert!(bad(&|c| c.confidence = -0.01).is_err());
+        assert!(bad(&|c| c.confidence = f32::NAN).is_err());
+        assert_eq!(bad(&|c| c.confidence = 1.0), Ok(()));
+        assert!(bad(&|c| c.type_str = " ".into()).is_err());
+        assert!(bad(&|c| c.value = "".into()).is_err());
+        assert!(bad(&|c| c.type_str = "a\0".into()).is_err());
+        assert!(bad(&|c| c.value = "a\0".into()).is_err());
+        assert!(bad(&|c| c.reasoning = "\0".into()).is_err());
+        assert!(bad(&|c| c.level = Some(11)).is_err());
+        assert!(bad(&|c| c.level = Some(-1)).is_err());
+        assert_eq!(bad(&|c| c.level = Some(10)), Ok(()));
+        assert_eq!(bad(&|c| c.level = Some(0)), Ok(()));
+        assert!(
+            bad(&|c| c.kind = ActivityRecordType::Fact).is_err(),
+            "level on a fact"
+        );
+        assert!(
+            bad(&|c| c.started_at = Some(Utc.with_ymd_and_hms(10000, 1, 1, 0, 0, 0).unwrap()))
+                .is_err()
+        );
+        assert!(
+            bad(&|c| c.ended_at = Some(Utc.with_ymd_and_hms(0, 12, 31, 0, 0, 0).unwrap())).is_err()
+        );
+        assert_eq!(
+            bad(&|c| c.started_at = Some(Utc.with_ymd_and_hms(9999, 12, 31, 0, 0, 0).unwrap())),
+            Ok(())
+        );
+        assert!(
+            bad(&|c| {
+                c.started_at = Some(day(10));
+                c.ended_at = Some(day(9));
+            })
+            .is_err()
+        );
+        assert_eq!(
+            bad(&|c| {
+                c.started_at = Some(day(10));
+                c.ended_at = Some(day(10));
+            }),
+            Ok(())
+        );
+    }
+
     #[test]
     fn rows_carry_clean_values() {
         let mut r = rec(ActivityRecordType::Skill);
@@ -413,5 +479,267 @@ mod tests {
         assert_eq!(ev.fact_or_activity_id, fact.id);
         assert_eq!(ev.message_id, Some(99));
         assert_eq!(ev.weight, fact.confidence);
+    }
+}
+
+/// Property-based tests: the parser and sanitiser are total functions over
+/// untrusted input, and their output always satisfies the DB invariants.
+#[cfg(test)]
+mod proptests {
+    use chrono::{DateTime, TimeZone as _, Utc};
+    use proptest::prelude::*;
+    use serde_json::{Value, json};
+    use unidb::ActivityRecordType;
+
+    use super::*;
+
+    fn kind() -> impl Strategy<Value = ActivityRecordType> {
+        prop_oneof![
+            Just(ActivityRecordType::Activity),
+            Just(ActivityRecordType::Fact),
+            Just(ActivityRecordType::Skill),
+            Just(ActivityRecordType::Emotion),
+        ]
+    }
+
+    /// Any instant chrono can represent (years -262143..=262142).
+    fn any_datetime() -> impl Strategy<Value = DateTime<Utc>> {
+        let min = DateTime::<Utc>::MIN_UTC.timestamp();
+        let max = DateTime::<Utc>::MAX_UTC.timestamp() - 1;
+        (min..max, 0u32..1_000_000_000).prop_map(|(s, n)| Utc.timestamp_opt(s, n).unwrap())
+    }
+
+    /// Mostly plausible dates, sometimes extreme ones.
+    fn date() -> impl Strategy<Value = Option<DateTime<Utc>>> {
+        prop_oneof![
+            3 => Just(None),
+            5 => (946_684_800i64..4_102_444_800).prop_map(|s| Some(Utc.timestamp_opt(s, 0).unwrap())),
+            1 => any_datetime().prop_map(Some),
+        ]
+    }
+
+    fn float() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            4 => 0.0..=1.0f64,
+            2 => -1e6..1e6f64,
+            1 => prop::num::f64::ANY,
+            1 => Just(f64::NAN),
+            1 => Just(f64::INFINITY),
+            1 => Just(f64::NEG_INFINITY),
+            1 => Just(-0.0),
+        ]
+    }
+
+    fn text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => "[a-z_ ]{0,20}",
+            2 => any::<String>(),
+            1 => Just("\0".to_string()),
+            1 => Just("   ".to_string()),
+            1 => "\\PC{0,5}\0\\PC{0,5}",
+        ]
+    }
+
+    fn record() -> impl Strategy<Value = ExtractedRecord> {
+        (
+            kind(),
+            text(),
+            text(),
+            float(),
+            text(),
+            date(),
+            date(),
+            prop::option::of(float()),
+            prop::option::of(any::<bool>()),
+        )
+            .prop_map(
+                |(
+                    kind,
+                    type_str,
+                    value,
+                    confidence,
+                    reasoning,
+                    started_at,
+                    ended_at,
+                    level,
+                    is_current,
+                )| {
+                    ExtractedRecord {
+                        kind,
+                        type_str,
+                        value,
+                        confidence,
+                        reasoning,
+                        started_at,
+                        ended_at,
+                        level,
+                        is_current,
+                    }
+                },
+            )
+    }
+
+    /// Records that JSON can carry (finite numbers).
+    fn json_record() -> impl Strategy<Value = ExtractedRecord> {
+        record().prop_filter("JSON has no NaN/inf", |r| {
+            r.confidence.is_finite() && r.level.is_none_or(f64::is_finite)
+        })
+    }
+
+    fn arb_json() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            (-1e300..1e300f64).prop_map(Value::from),
+            any::<String>().prop_map(Value::from),
+            Just(json!("fact")),
+            Just(json!("skill")),
+            Just(json!("2026-01-01T00:00:00Z")),
+        ];
+        leaf.prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                prop::collection::btree_map(
+                    prop_oneof![
+                        Just("records".to_string()),
+                        Just("kind".to_string()),
+                        Just("type".to_string()),
+                        Just("value".to_string()),
+                        Just("confidence".to_string()),
+                        Just("level".to_string()),
+                        Just("started_at".to_string()),
+                        Just("ended_at".to_string()),
+                        "[a-z]{1,8}",
+                    ],
+                    inner,
+                    0..8
+                )
+                .prop_map(|m| Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    fn sent_at() -> impl Strategy<Value = DateTime<Utc>> {
+        (946_684_800i64..4_102_444_800).prop_map(|s| Utc.timestamp_opt(s, 0).unwrap())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+
+        #[test]
+        fn parse_never_panics_on_strings(raw in any::<String>()) {
+            let _ = parse_llm_response(&raw);
+        }
+
+        #[test]
+        fn parse_never_panics_on_json(v in arb_json()) {
+            let _ = parse_llm_response(&v.to_string());
+            let _ = parse_llm_response(&json!({ "records": [v] }).to_string());
+        }
+
+        /// Every entry of `records` is either parsed or counted as malformed.
+        #[test]
+        fn parse_accounts_for_every_entry(entries in prop::collection::vec(arb_json(), 0..10)) {
+            let n = entries.len();
+            let p = parse_llm_response(&json!({ "records": entries }).to_string()).unwrap();
+            prop_assert_eq!(p.records.len() + p.malformed, n);
+        }
+
+        #[test]
+        fn valid_records_round_trip(records in prop::collection::vec(json_record(), 0..6)) {
+            let raw = json!({ "records": records }).to_string();
+            let p = parse_llm_response(&raw).unwrap();
+            prop_assert_eq!(p.malformed, 0);
+            // serde_json's default float parser is not exactly round-trip
+            // (can be 1 ULP off); confidence is stored as f32, so compare at
+            // stored precision.
+            let at_f32 = |rs: &[ExtractedRecord]| -> Vec<ExtractedRecord> {
+                rs.iter()
+                    .map(|r| ExtractedRecord {
+                        confidence: r.confidence as f32 as f64,
+                        level: r.level.map(|l| l as f32 as f64),
+                        ..r.clone()
+                    })
+                    .collect()
+            };
+            prop_assert_eq!(at_f32(&p.records), at_f32(&records));
+        }
+
+        #[test]
+        fn sanitized_records_satisfy_db_invariants(r in record(), sent in sent_at()) {
+            if let Some(c) = sanitize(&r, sent) {
+                prop_assert_eq!(c.check_invariants(), Ok(()), "{:?} -> {:?}", r, c);
+                prop_assert_eq!(c.kind, r.kind);
+            }
+        }
+
+        /// Nothing usable is thrown away: a record is only dropped for an
+        /// empty type/value or a non-finite confidence.
+        #[test]
+        fn sanitize_only_drops_unusable_records(r in record(), sent in sent_at()) {
+            let usable = !strip_nul(&r.type_str).trim().is_empty()
+                && !strip_nul(&r.value).trim().is_empty()
+                && r.confidence.is_finite();
+            prop_assert_eq!(sanitize(&r, sent).is_some(), usable);
+        }
+
+        /// In-range values pass through unchanged.
+        #[test]
+        fn in_range_values_are_preserved(r in record(), sent in sent_at()) {
+            if let Some(c) = sanitize(&r, sent) {
+                if (0.0..=1.0).contains(&r.confidence) {
+                    prop_assert_eq!(c.confidence, r.confidence as f32);
+                }
+                if r.kind == ActivityRecordType::Skill
+                    && let Some(l) = r.level
+                    && l.fract() == 0.0 && (0.0..=10.0).contains(&l)
+                {
+                    prop_assert_eq!(c.level, Some(l as i16));
+                }
+                if r.kind == ActivityRecordType::Activity {
+                    prop_assert_eq!(c.is_current, r.is_current);
+                }
+            }
+        }
+
+        /// Sanitising a clean record again changes nothing.
+        #[test]
+        fn sanitize_is_idempotent(r in record(), sent in sent_at()) {
+            if let Some(c) = sanitize(&r, sent) {
+                let again = ExtractedRecord {
+                    kind: c.kind,
+                    type_str: c.type_str.clone(),
+                    value: c.value.clone(),
+                    confidence: c.confidence as f64,
+                    reasoning: c.reasoning.clone(),
+                    started_at: c.started_at,
+                    ended_at: c.ended_at,
+                    level: c.level.map(f64::from),
+                    is_current: c.is_current,
+                };
+                prop_assert_eq!(sanitize(&again, sent), Some(c));
+            }
+        }
+
+        #[test]
+        fn rows_mirror_the_clean_record(r in record(), sent in sent_at(), msg_id in any::<i64>()) {
+            if let Some(c) = sanitize(&r, sent) {
+                let user = uuid::Uuid::new_v4();
+                let fact = build_fact(user, &c);
+                let ev = build_evidence(fact.id, msg_id, &c);
+                prop_assert_eq!(fact.user_id, user);
+                prop_assert_eq!(fact.record_type, c.kind);
+                prop_assert_eq!(&fact.type_str, &c.type_str);
+                prop_assert_eq!(&fact.value, &c.value);
+                prop_assert_eq!(fact.confidence, c.confidence);
+                prop_assert_eq!(fact.level, c.level);
+                prop_assert_eq!((fact.started_at, fact.ended_at, fact.is_current), (c.started_at, c.ended_at, c.is_current));
+                prop_assert_eq!(ev.fact_or_activity_id, fact.id);
+                prop_assert_eq!(ev.message_id, Some(msg_id));
+                prop_assert!((0.0..=1.0).contains(&ev.weight));
+                prop_assert_eq!(&ev.reasoning, &c.reasoning);
+            }
+        }
     }
 }

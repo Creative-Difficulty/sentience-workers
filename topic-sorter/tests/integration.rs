@@ -9,7 +9,11 @@ use std::time::Duration;
 use chrono::{DateTime, TimeZone as _, Utc};
 use llm_worker_common::test_support::{SeedMessage, TestDb, chat_completion};
 use serde_json::{Value, json};
-use topic_sorter::{config::Config, llm, worker::Worker};
+use topic_sorter::{
+    config::Config,
+    llm,
+    worker::{BatchOutcome, Worker},
+};
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -115,8 +119,17 @@ async fn happy_path_creates_topics_relations_and_attempts() {
         .await;
 
     let w = worker(&db, &llm, &[]);
-    let _ = w.process_batch().await;
-    let _ = w.process_batch().await; // queue empty: no second LLM call
+    let outcome = w.process_batch().await.unwrap();
+    assert_eq!(
+        outcome,
+        BatchOutcome {
+            fetched: 4,
+            attempted: 4,
+            ..Default::default()
+        }
+    );
+    // queue empty: no second LLM call
+    assert_eq!(w.process_batch().await.unwrap(), BatchOutcome::default());
 
     assert_eq!(db.count("SELECT count(*) FROM topic").await, 2);
     assert_eq!(
@@ -159,9 +172,28 @@ async fn malformed_json_is_retried_then_given_up() {
         &llm,
         &[("MAX_ATTEMPTS", "2"), ("RETRY_BASE_DELAY_SECS", "0")],
     );
+    let mut outcomes = Vec::new();
     for _ in 0..4 {
-        let _ = w.process_batch().await;
+        outcomes.push(w.process_batch().await.unwrap());
     }
+    assert_eq!(
+        outcomes,
+        vec![
+            BatchOutcome {
+                fetched: 2,
+                failed: 2,
+                ..Default::default()
+            },
+            BatchOutcome {
+                fetched: 2,
+                attempted: 2,
+                given_up: 2,
+                ..Default::default()
+            },
+            BatchOutcome::default(),
+            BatchOutcome::default(),
+        ]
+    );
     assert!(
         attempted(&db, 1).await && attempted(&db, 2).await,
         "batch with a permanently malformed LLM response was never recorded as attempted"
@@ -203,6 +235,39 @@ async fn failing_batch_does_not_block_the_queue() {
     assert!(!attempted(&db, 1).await, "still within the retry budget");
 }
 
+/// A batch that fails because of its own content must not abort the round:
+/// the other channels of the same round are still classified.
+#[tokio::test]
+async fn message_failure_does_not_abort_the_round() {
+    let Some((db, llm)) = setup().await else {
+        return;
+    };
+    seed(&db, 1, CHANNEL, "POISON one", 0).await;
+    seed(&db, 2, OTHER_CHANNEL, "deploy failed", 1).await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("POISON"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_completion("garbage")))
+        .with_priority(1)
+        .mount(&llm)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(groups(&[("deploy failure", &[2])]))
+        .with_priority(2)
+        .mount(&llm)
+        .await;
+    let outcome = worker(&db, &llm, &[]).process_batch().await.unwrap();
+    assert_eq!(
+        outcome,
+        BatchOutcome {
+            fetched: 2,
+            attempted: 1,
+            failed: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(topic_of(&db, 2).await.as_deref(), Some("deploy failure"));
+}
+
 #[tokio::test]
 async fn server_errors_do_not_consume_the_retry_budget() {
     let Some((db, llm)) = setup().await else {
@@ -219,7 +284,12 @@ async fn server_errors_do_not_consume_the_retry_budget() {
         &[("MAX_ATTEMPTS", "1"), ("RETRY_BASE_DELAY_SECS", "0")],
     );
     for _ in 0..3 {
-        let _ = w.process_batch().await;
+        let outcome = w.process_batch().await.unwrap();
+        assert_eq!(
+            (outcome.fetched, outcome.failed, outcome.attempted),
+            (1, 1, 0)
+        );
+        assert!(outcome.backoff.is_some(), "provider outage must back off");
     }
     assert!(
         !attempted(&db, 1).await,
@@ -546,13 +616,19 @@ async fn ready_file_written_only_after_successful_startup() {
     );
     drop(p);
 
-    let p = spawn_binary(
+    let mut p = spawn_binary(
         &format!("{dotenv}LLM_MODEL=m\n"),
         &[("READY_FILE", &ready_s)],
     );
     assert!(
         wait_for(|| ready.exists(), Duration::from_secs(10)),
         "ready file not written at {ready_s} for a valid config"
+    );
+    // ... and keeps polling instead of exiting
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        matches!(p.child.try_wait(), Ok(None)),
+        "worker exited after becoming ready"
     );
     drop(p);
     let _ = std::fs::remove_file(&ready);
@@ -585,6 +661,11 @@ async fn rust_log_from_dotenv_is_honoured() {
     assert!(
         !out.contains("DEBUG"),
         "RUST_LOG=topic_sorter=info from .env ignored; output:\n{out}"
+    );
+    // ... while INFO still gets through (tracing is actually installed)
+    assert!(
+        out.contains("INFO") && out.contains("processing batch"),
+        "no INFO output; output:\n{out}"
     );
 }
 

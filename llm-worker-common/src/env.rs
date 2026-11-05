@@ -138,4 +138,17 @@ mod tests {
         assert_eq!(env.secs("Z", 30, 0).unwrap(), Duration::ZERO);
         assert!(env.secs("Z", 30, 1).is_err());
     }
+
+    #[test]
+    fn paths() {
+        let m = env_of(&[("P", "/run/ready"), ("E", "")]);
+        let get = |k: &str| m.get(k).cloned();
+        let env = Env::new(&get);
+        assert_eq!(env.path_or("P", "/tmp/ready"), PathBuf::from("/run/ready"));
+        assert_eq!(env.path_or("E", "/tmp/ready"), PathBuf::from("/tmp/ready"));
+        assert_eq!(
+            env.path_or("MISSING", "/tmp/ready"),
+            PathBuf::from("/tmp/ready")
+        );
+    }
 }

@@ -314,12 +314,32 @@ mod tests {
 
     #[test]
     fn stale_entries_are_forgotten() {
+        assert_eq!(FORGET_AFTER, Duration::from_secs(86_400));
         let mut t = RetryTracker::new(policy(5));
+        assert_eq!(t.len(), 0);
+        assert!(t.is_empty());
         let now = Instant::now();
         t.record_failure(1, FailureKind::Message, now);
-        assert_eq!(t.len(), 1);
-        t.cooling_down(now + FORGET_AFTER + Duration::from_secs(1));
+        t.record_failure(2, FailureKind::Message, now);
+        assert_eq!(t.len(), 2);
+        assert!(!t.is_empty());
+        // kept (and no longer cooling down) for a while ...
+        assert!(t.cooling_down(now + Duration::from_secs(3600)).is_empty());
+        assert_eq!(t.len(), 2);
+        // ... and dropped exactly after FORGET_AFTER
+        t.cooling_down(now + FORGET_AFTER);
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn healthy_signal_makes_systemic_failures_count() {
+        let mut t = RetryTracker::new(policy(1));
+        let now = Instant::now();
+        t.record_healthy();
+        assert_eq!(
+            t.record_failure(1, FailureKind::Systemic, now),
+            Verdict::GiveUp { strikes: 1 }
+        );
     }
 
     #[test]

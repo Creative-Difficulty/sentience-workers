@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 612f2c51e2a8b41931c8eb199c208b381f84ea5decf0d1e5bf7be67a924d5c58 # shrinks to records = [ExtractedRecord { kind: Activity, type_str: "", value: "", confidence: 0.12429687740281095, reasoning: "", started_at: None, ended_at: None, level: None, is_current: None }]

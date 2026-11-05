@@ -1,6 +1,8 @@
 [workspace]
 members = ["fact-extractor", "ingest-vestibule-retriever", "llm-worker-common", "topic-sorter"]
 resolver = "2"
+# cargo-fuzz crate with its own workspace (nightly only)
+exclude = ["fuzz"]
 
 [workspace.dependencies]
 color-eyre = "0.6"

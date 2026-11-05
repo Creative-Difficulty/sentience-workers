@@ -94,7 +94,17 @@ mod tests {
     }
 
     #[test]
+    fn nul_stripping() {
+        assert_eq!(strip_nul("a\0b\0"), "ab");
+        assert_eq!(strip_nul("plain"), "plain");
+        assert_eq!(strip_nul(""), "");
+    }
+
+    #[test]
     fn code_fences() {
+        // JSON starting on the fence line is kept whole
+        assert_eq!(strip_code_fence("```{\"a\":\n1}```"), "{\"a\":\n1}");
+        assert_eq!(strip_code_fence("```[1,\n2]```"), "[1,\n2]");
         assert_eq!(strip_code_fence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_code_fence("```\n{\"a\":1}```"), "{\"a\":1}");
         assert_eq!(strip_code_fence("```{\"a\":1}```"), "{\"a\":1}");

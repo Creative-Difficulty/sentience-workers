@@ -7,7 +7,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone as _, Utc};
-use fact_extractor::{config::Config, llm, worker::Worker};
+use fact_extractor::{
+    config::Config,
+    llm,
+    worker::{BatchOutcome, Worker},
+};
 use llm_worker_common::test_support::{SeedMessage, TestDb, chat_completion};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, method, path};
@@ -100,9 +104,18 @@ async fn happy_path_stores_facts_evidence_and_attempt() {
         .await;
 
     let w = worker(&db, &llm, &[]);
-    let _ = w.process_batch().await;
+    let outcome = w.process_batch().await.unwrap();
+    assert_eq!(
+        outcome,
+        BatchOutcome {
+            fetched: 1,
+            attempted: 1,
+            ..Default::default()
+        }
+    );
     // Nothing left to do: must not call the LLM again.
-    let _ = w.process_batch().await;
+    let outcome = w.process_batch().await.unwrap();
+    assert_eq!(outcome, BatchOutcome::default());
 
     assert_eq!(
         db.count("SELECT count(*) FROM user_facts_and_activities")
@@ -197,9 +210,29 @@ async fn malformed_json_is_retried_then_given_up() {
         &llm,
         &[("MAX_ATTEMPTS", "2"), ("RETRY_BASE_DELAY_SECS", "0")],
     );
+    let mut outcomes = Vec::new();
     for _ in 0..4 {
-        let _ = w.process_batch().await;
+        outcomes.push(w.process_batch().await.unwrap());
     }
+    // a bad answer is the message's fault: no global back-off
+    assert_eq!(
+        outcomes,
+        vec![
+            BatchOutcome {
+                fetched: 1,
+                failed: 1,
+                ..Default::default()
+            },
+            BatchOutcome {
+                fetched: 1,
+                attempted: 1,
+                given_up: 1,
+                ..Default::default()
+            },
+            BatchOutcome::default(),
+            BatchOutcome::default(),
+        ]
+    );
 
     assert!(
         attempted(&db, 1).await,
@@ -261,7 +294,16 @@ async fn failing_messages_do_not_block_the_queue() {
         .await;
 
     let w = worker(&db, &llm, &[("BATCH_SIZE", "2")]);
-    for _ in 0..3 {
+    let first = w.process_batch().await.unwrap();
+    assert_eq!(
+        first,
+        BatchOutcome {
+            fetched: 2,
+            failed: 2,
+            ..Default::default()
+        }
+    );
+    for _ in 0..2 {
         let _ = w.process_batch().await;
     }
 
@@ -304,7 +346,10 @@ async fn server_errors_do_not_consume_the_retry_budget() {
         &[("MAX_ATTEMPTS", "1"), ("RETRY_BASE_DELAY_SECS", "0")],
     );
     for _ in 0..3 {
-        let _ = w.process_batch().await;
+        let outcome = w.process_batch().await.unwrap();
+        assert_eq!(outcome.fetched, 1);
+        assert_eq!((outcome.failed, outcome.attempted), (1, 0));
+        assert!(outcome.backoff.is_some(), "provider outage must back off");
     }
     assert!(
         !attempted(&db, 1).await,
@@ -352,6 +397,54 @@ async fn crash_before_attempt_row_does_not_duplicate_facts() {
         2,
         "facts were duplicated after a crash between the facts commit and the attempt insert"
     );
+}
+
+/// The replied-to message is shown in its own section, not again among the
+/// surrounding messages.
+#[tokio::test]
+async fn reply_target_is_not_repeated_in_context() {
+    let Some((db, llm)) = setup().await else {
+        return;
+    };
+    db.seed_user(AUTHOR + 1).await;
+    db.seed_user(AUTHOR + 2).await;
+    db.seed_message(SeedMessage::new(
+        1,
+        CHANNEL,
+        AUTHOR + 1,
+        "UNIQUEMARKER does anyone here climb?",
+        t(0),
+    ))
+    .await;
+    db.seed_message(SeedMessage::new(
+        2,
+        CHANNEL,
+        AUTHOR + 2,
+        "context message",
+        t(1),
+    ))
+    .await;
+    let mut reply = SeedMessage::new(3, CHANNEL, AUTHOR, "yes, I boulder twice a week", t(2));
+    reply.in_reply_to = Some(1);
+    db.seed_message(reply).await;
+    // messages 1 and 2 are already done; only 3 is processed
+    sqlx::query("INSERT INTO fact_extraction_attempts (message_id) VALUES (1), (2)")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    Mock::given(method("POST"))
+        .respond_with(llm_reply(vec![]))
+        .mount(&llm)
+        .await;
+
+    let outcome = worker(&db, &llm, &[]).process_batch().await.unwrap();
+    assert_eq!(outcome.attempted, 1);
+    let reqs = llm.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    let system = body["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(system.matches("UNIQUEMARKER").count(), 1, "{system}");
+    assert!(system.contains("# Replying to\n"));
+    assert!(system.contains("context message"));
 }
 
 #[tokio::test]
@@ -603,16 +696,67 @@ async fn rust_log_from_dotenv_is_honoured() {
         llm.uri(),
         ready.display()
     );
+    // one message, so the worker logs an INFO line ("processing batch")
+    db.seed_message(SeedMessage::new(
+        1,
+        CHANNEL,
+        AUTHOR,
+        "I live in Vienna",
+        t(0),
+    ))
+    .await;
+    Mock::given(method("POST"))
+        .respond_with(llm_reply(vec![]))
+        .mount(&llm)
+        .await;
     let mut p = spawn_binary(&dotenv, &[]);
     // give it time to start up and log its start-up debug lines
     wait_for(|| ready.exists(), Duration::from_secs(10));
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(1500));
     let _ = p.child.kill();
     let out = p.child.wait_with_output_ref();
     let _ = std::fs::remove_file(&ready);
     assert!(
         !out.contains("DEBUG"),
         "RUST_LOG=fact_extractor=info from .env ignored; output:\n{out}"
+    );
+    // ... while INFO still gets through (tracing is actually installed)
+    assert!(
+        out.contains("INFO") && out.contains("processing batch"),
+        "no INFO output; output:\n{out}"
+    );
+}
+
+/// A `.env` that cannot be parsed is reported (not silently ignored); the
+/// process environment still configures the worker.
+#[tokio::test]
+async fn unparsable_dotenv_is_reported() {
+    let Some((db, llm)) = setup().await else {
+        return;
+    };
+    let ready = std::env::temp_dir().join(format!("fe-ready-{}", uuid_like()));
+    let ready_s = ready.display().to_string();
+    let uri = llm.uri();
+    let mut p = spawn_binary(
+        "RUST_LOG=fact_extractor=info\n\"unterminated quote\n",
+        &[
+            ("DATABASE_URL", db.url.as_str()),
+            ("LLM_BASE_URL", uri.as_str()),
+            ("LLM_API_KEY", "k"),
+            ("LLM_MODEL", "m"),
+            ("DISCORD_SERVER_NAME", "s"),
+            ("READY_FILE", ready_s.as_str()),
+            ("RUST_LOG", "fact_extractor=info"),
+        ],
+    );
+    let became_ready = wait_for(|| ready.exists(), Duration::from_secs(10));
+    let _ = p.child.kill();
+    let out = p.child.wait_with_output_ref();
+    let _ = std::fs::remove_file(&ready);
+    assert!(became_ready, "worker did not start; output:\n{out}");
+    assert!(
+        out.contains("WARN") && out.contains("failed to load .env"),
+        "unparsable .env not reported; output:\n{out}"
     );
 }
 
@@ -645,10 +789,16 @@ async fn ready_file_written_only_after_successful_startup() {
     drop(p);
 
     // valid config: becomes ready
-    let p = spawn_binary(&base(&llm.uri()), &[("READY_FILE", &ready_s)]);
+    let mut p = spawn_binary(&base(&llm.uri()), &[("READY_FILE", &ready_s)]);
     assert!(
         wait_for(|| ready.exists(), Duration::from_secs(10)),
         "ready file not written at {ready_s} for a valid config"
+    );
+    // ... and keeps polling instead of exiting
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        matches!(p.child.try_wait(), Ok(None)),
+        "worker exited after becoming ready"
     );
     drop(p);
     let _ = std::fs::remove_file(&ready);

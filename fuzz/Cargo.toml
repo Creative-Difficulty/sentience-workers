@@ -1,0 +1,50 @@
+[package]
+name = "llm-workers-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Separate workspace: built only by `cargo +nightly fuzz` (see README.md).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+chrono = "0.4"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+fact-extractor = { path = "../fact-extractor" }
+topic-sorter = { path = "../topic-sorter" }
+# same spec as the workspace so the types unify (revision pinned by Cargo.lock)
+unidb = { git = "https://github.com/Vimothy-s-Vestibule/unidb-schema" }
+
+[[bin]]
+name = "fe_parse"
+path = "fuzz_targets/fe_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fe_sanitize"
+path = "fuzz_targets/fe_sanitize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ts_parse"
+path = "fuzz_targets/ts_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ts_normalize"
+path = "fuzz_targets/ts_normalize.rs"
+test = false
+doc = false
+bench = false
